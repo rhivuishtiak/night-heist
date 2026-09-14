@@ -119,7 +119,7 @@
 <body>
 
 <div id="introScreen">
-  <video id="introVideo" muted playsinline></video>
+  <video id="introVideo" playsinline></video>
   <div id="logoScreen">
     <div class="logo-row">
       <div class="logo-dot cyan"></div>
@@ -603,7 +603,18 @@ const Intro = {
     video.addEventListener('ended', playLogo);
     video.src = 'intro.mp4';
     video.style.display = 'block';
-    video.play().catch(playLogo);
+    // Browsers only allow autoplay WITH sound after a user gesture — try it
+    // unmuted first (works for some returning visitors / lenient browsers),
+    // and if that's rejected, fall back to muted autoplay so the video still
+    // shows, unmuting the instant the player clicks or presses anything.
+    video.muted = false;
+    video.play().catch(() => {
+      video.muted = true;
+      video.play().catch(playLogo);
+    });
+    const unmute = () => { video.muted = false; };
+    window.addEventListener('pointerdown', unmute, { once: true });
+    window.addEventListener('keydown', unmute, { once: true });
     // intro.mp4 isn't in this repo yet — if it never even starts loading,
     // don't leave players staring at a black screen waiting for it.
     setTimeout(() => { if (video.readyState === 0) playLogo(); }, 800);
