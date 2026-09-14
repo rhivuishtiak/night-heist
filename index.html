@@ -1,0 +1,1446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Night Heist - Multiplayer</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #05070d;
+    color: #dfe6f0;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    overflow: hidden;
+  }
+  #ui {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 10;
+    background: rgba(10, 14, 24, 0.75);
+    border: 1px solid #2a3550;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 14px;
+    line-height: 1.5;
+    max-width: 480px;
+    display: none;
+  }
+  #ui b { color: #ffd166; }
+  #game-container { display: none; }
+  #game-container canvas { display: block; margin: 0 auto; }
+
+  #lobby {
+    position: fixed;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 380px;
+    max-width: calc(100vw - 32px);
+    background: rgba(15, 19, 32, 0.95);
+    border: 1px solid #2a3550;
+    border-radius: 12px;
+    padding: 22px 24px;
+    box-sizing: border-box;
+  }
+  #lobby h2 { margin: 0 0 4px; font-size: 20px; }
+  #lobby p.sub { margin: 0 0 16px; font-size: 13px; color: #9aa5c0; }
+  #lobby label { display: block; font-size: 12px; color: #9aa5c0; margin-bottom: 4px; }
+  #lobby input[type=text] {
+    width: 100%; box-sizing: border-box; padding: 8px 10px; margin-bottom: 12px;
+    border-radius: 6px; border: 1px solid #3a4568; background: #10152a; color: #eef1ff; font-size: 14px;
+  }
+  #lobby button {
+    padding: 9px 14px; border-radius: 6px; border: none; cursor: pointer;
+    font-size: 14px; font-weight: 600; margin-right: 8px;
+  }
+  #lobby .btn-primary { background: #ffd166; color: #241a00; }
+  #lobby .btn-primary:disabled { background: #6b6250; color: #33302a; cursor: not-allowed; }
+  #lobby .btn-secondary { background: #3a4568; color: #eef1ff; }
+  #lobby .divider { border-top: 1px solid #2a3550; margin: 16px 0; }
+  #lobbyError {
+    display: none; background: #4a1420; border: 1px solid #8a2c3f; color: #ffc9d4;
+    padding: 8px 10px; border-radius: 6px; font-size: 12px; margin-bottom: 12px;
+  }
+  #roomView { display: none; }
+  #roomCodeDisplay {
+    font-size: 28px; font-weight: 700; letter-spacing: 4px; color: #ffd166;
+  }
+  #playerListUl { list-style: none; padding: 0; margin: 10px 0; font-size: 14px; }
+  #playerListUl li { padding: 4px 0; border-bottom: 1px solid #232a44; }
+  #roleRuleNote { font-size: 12px; color: #9aa5c0; margin: 10px 0; }
+  #waitingNote { font-size: 13px; color: #ffd166; display: none; }
+</style>
+</head>
+<body>
+
+<div id="lobby">
+  <h2>Night Heist</h2>
+  <p class="sub">Police &amp; Thieves — Night Heist. Create a room and share the code, or join one.</p>
+  <div id="lobbyError"></div>
+
+  <div id="joinCreateView">
+    <label for="playerName">Your name</label>
+    <input type="text" id="playerName" placeholder="e.g. Alex" maxlength="20">
+
+    <button class="btn-primary" id="createRoomBtn">Create Room</button>
+
+    <div class="divider"></div>
+
+    <label for="joinCodeInput">Room code</label>
+    <input type="text" id="joinCodeInput" placeholder="e.g. K7QP" maxlength="4" style="text-transform:uppercase">
+    <button class="btn-secondary" id="joinRoomBtn">Join Room</button>
+  </div>
+
+  <div id="roomView">
+    <div>Room code: <span id="roomCodeDisplay"></span></div>
+    <div style="font-size:12px;color:#9aa5c0;margin-top:2px;">Share this code with the others playing.</div>
+    <ul id="playerListUl"></ul>
+    <div id="roleRuleNote"></div>
+    <button class="btn-primary" id="startMatchBtn" style="display:none;">Start Match</button>
+    <div id="waitingNote">Waiting for the host to start the match...</div>
+  </div>
+</div>
+
+<div id="ui">
+  <div><b>NIGHT HEIST — Multiplayer</b></div>
+  <div>Move with <b>WASD</b> or <b>Arrow Keys</b> (whichever you're comfortable with — you only control your own character).</div>
+  <div id="roleReminder"></div>
+</div>
+
+<div id="game-container"></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+<script>
+// ---------------------------------------------------------------------------
+// NIGHT HEIST — Multiplayer build.
+//
+// SETUP REQUIRED (about 5 minutes, one-time):
+//   1. Go to https://console.firebase.google.com -> "Add project" (you can
+//      skip Google Analytics, it isn't needed here).
+//   2. In your new project, open Build > Realtime Database > Create Database
+//      > start in test mode (fine for a short-lived game jam project).
+//   3. Click the gear icon (top-left) > Project settings > scroll down to
+//      "Your apps" > click the </> (Web) icon > register an app (no need for
+//      Firebase Hosting) > it will show you a `firebaseConfig` object.
+//   4. Copy that object and paste its values into firebaseConfig below,
+//      replacing the placeholder strings.
+// That's it — no backend server, no deployment. This file talks to Firebase
+// directly from the browser, which is why the values above are safe to
+// leave in a plain HTML file: they identify your project, they are not
+// secret credentials.
+// ---------------------------------------------------------------------------
+const firebaseConfig = {
+  apiKey: "AIzaSyDo5yxajnZhJM1c0grWMbesDSGEAWA1IOs",
+  authDomain: "night-heist.firebaseapp.com",
+  databaseURL: "https://night-heist-default-rtdb.firebaseio.com",
+  projectId: "night-heist",
+  storageBucket: "night-heist.firebasestorage.app",
+  messagingSenderId: "978332805350",
+  appId: "1:978332805350:web:41cc281479be219a10f327"
+};
+
+const FIREBASE_NOT_CONFIGURED = firebaseConfig.apiKey === "YOUR_API_KEY_HERE";
+let db = null;
+let serverOffset = 0;
+if (!FIREBASE_NOT_CONFIGURED) {
+  firebase.initializeApp(firebaseConfig);
+  db = firebase.database();
+  db.ref('.info/serverTimeOffset').on('value', snap => { serverOffset = snap.val() || 0; });
+}
+function estimatedServerNow() { return Date.now() + serverOffset; }
+
+const MY_ID = 'p_' + Math.random().toString(36).slice(2, 10);
+const ROLE_THIEF = 'thief';
+const ROLE_GUARD = 'nightguard';
+
+function makeRoomCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no O/0 or I/1, avoids confusion
+  let s = '';
+  for (let i = 0; i < 4; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+
+// 2-3 players -> 1 Nightguard, 4-7 -> 2, 8-10 -> 3. Everyone else is a Thief.
+function guardCountFor(n) { return n <= 3 ? 1 : (n <= 7 ? 2 : 3); }
+
+function assignRoles(playerIds) {
+  const guardCount = guardCountFor(playerIds.length);
+  const shuffled = playerIds.slice();
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  const roles = {};
+  shuffled.forEach((id, idx) => { roles[id] = idx < guardCount ? ROLE_GUARD : ROLE_THIEF; });
+  return roles;
+}
+
+const TILE_SIZE = 48;
+
+// Rooms sit in a grid of "zones"; each zone gets one good-sized room, and
+// every pair of side-by-side zones gets a wide connecting hallway — big open
+// rooms + broad multi-route hallways, Among-Us-style, not a 1-tile maze.
+const ZONE_COLS = 3;
+const ZONE_ROWS = 2;
+const ZONE_W = 8;
+const ZONE_H = 7;
+const GRID_W = ZONE_COLS * ZONE_W;
+const GRID_H = ZONE_ROWS * ZONE_H;
+
+const FLOOR = 0;
+const WALL = 1;
+
+const VISION_RANGE = 260;
+const VISION_HALF_ANGLE_DEG = 32;
+const RAY_ANGLE_STEPS = 48;  // more rays = smoother cone edge, fewer corner-graze artifacts
+const MARCH_STEP = 4;        // finer march = less "notching" when a ray grazes a wall/furniture corner
+const CAUGHT_FREEZE_MS = 1400;
+
+const LOOT_TARGET = 2000;
+const LOOT_PER_ROOM = 3;
+const LOOT_MIN_VALUE = 50;
+const LOOT_MAX_VALUE = 300;
+const MATCH_SECONDS = 150;
+
+const FATIGUE_MAX = 100;
+const FATIGUE_DRAIN_PER_SEC = 100 / 25;
+// The coffee machine is a solid 48x48 collider and the player is a radius-15
+// circle, so depending on the angle you walk up from, the closest you can
+// physically stand is somewhere between ~39px (straight on) and ~49px
+// (diagonal, hitting the corner) from its center. 40 was too tight — it was
+// reachable only from a couple of exact angles, which read as "can't reset
+// it at all". Comfortably clears the worst case (diagonal) from every angle.
+const COFFEE_REFILL_RADIUS = 65;
+const COFFEE_CHANNEL_MS = 3000; // must stand at the coffee machine this long, uninterrupted, for a full refill
+const THIEF_SIGHT_RADIUS = 190; // thieves see this far in every direction; guards see only their vision cone
+const THIEF_SWEEPS = 4;          // a Thief's 360 view is cast as 4 quarter sweeps (one polygon each)
+const THIEF_RAY_STEPS = 24;      // uniform rays per quarter sweep, before corner supplements
+// Darkness levels (0 = fully clear, 1 = pure black). Outside your visible area
+// vs. inside it — the two roles deliberately look different: the Nightguard's
+// world is dim everywhere but crisp inside the cone; a Thief's world is truly
+// black outside their own small bubble, and even that bubble stays a little dim.
+const GUARD_OUTER_DARKNESS = 0.55;
+const GUARD_INNER_DARKNESS = 0;
+const THIEF_OUTER_DARKNESS = 1;
+const THIEF_INNER_DARKNESS = 0.25;
+const DROWSY_RANGE_MULT = 0.4;
+const DROWSY_ANGLE_MULT = 0.5;
+
+const POSITION_SYNC_MS = 120; // how often we push our own position to Firebase
+const REMOTE_LERP = 0.25;     // how quickly remote sprites glide toward their synced position
+
+const ROOM_THEMES = [
+  { name: 'Break Room',        floor: 0xF3CFA0 },
+  { name: 'Meeting Room',      floor: 0xAFD4F5 },
+  { name: 'Server Room',       floor: 0xD3C2F0 },
+  { name: "Manager's Office",  floor: 0xBCE6BE },
+  { name: 'Reception',         floor: 0xF6EAA0 },
+  { name: 'Storage Closet',    floor: 0xE0CDB2 },
+];
+
+function shuffled(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+function randInt(min, max) { return min + Math.floor(Math.random() * (max - min + 1)); }
+
+// ---- Office layout generation: one room per zone + wide hallways between neighbors ----
+// Only the host ever calls this (once, at match start) — the resulting grid
+// and room list are written to Firebase so every player sees the identical map.
+function generateOfficeLayout() {
+  const grid = [];
+  for (let y = 0; y < GRID_H; y++) grid.push(new Array(GRID_W).fill(WALL));
+
+  const themes = shuffled(ROOM_THEMES);
+  const rooms = [];
+
+  for (let r = 0; r < ZONE_ROWS; r++) {
+    for (let c = 0; c < ZONE_COLS; c++) {
+      const zoneX0 = c * ZONE_W, zoneY0 = r * ZONE_H;
+      const x0 = zoneX0 + 1, x1 = zoneX0 + ZONE_W - 2;
+      const y0 = zoneY0 + 1, y1 = zoneY0 + ZONE_H - 2;
+      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) grid[y][x] = FLOOR;
+
+      const theme = themes[r * ZONE_COLS + c];
+      rooms.push({
+        x0, x1, y0, y1,
+        name: theme.name,
+        floorColor: theme.floor,
+        pxCenterX: ((x0 + x1 + 1) / 2) * TILE_SIZE,
+        pxCenterY: ((y0 + y1 + 1) / 2) * TILE_SIZE,
+        px0: x0 * TILE_SIZE, py0: y0 * TILE_SIZE,
+        pw: (x1 - x0 + 1) * TILE_SIZE, ph: (y1 - y0 + 1) * TILE_SIZE,
+      });
+    }
+  }
+
+  for (let r = 0; r < ZONE_ROWS; r++) {
+    for (let c = 0; c < ZONE_COLS - 1; c++) {
+      const a = rooms[r * ZONE_COLS + c], b = rooms[r * ZONE_COLS + c + 1];
+      const width = randInt(2, 3);
+      const bandStart = randInt(a.y0, a.y1 - width + 1);
+      for (let y = bandStart; y < bandStart + width; y++) for (let x = a.x1; x <= b.x0; x++) grid[y][x] = FLOOR;
+    }
+  }
+  for (let r = 0; r < ZONE_ROWS - 1; r++) {
+    for (let c = 0; c < ZONE_COLS; c++) {
+      const a = rooms[r * ZONE_COLS + c], b = rooms[(r + 1) * ZONE_COLS + c];
+      const width = randInt(2, 3);
+      const bandStart = randInt(a.x0, a.x1 - width + 1);
+      for (let x = bandStart; x < bandStart + width; x++) for (let y = a.y1; y <= b.y0; y++) grid[y][x] = FLOOR;
+    }
+  }
+
+  return { grid, rooms };
+}
+
+// Furniture layout is a pure function of the room list, so both the host's
+// pre-match loot placement (before Phaser even exists) and the in-game
+// rendering agree on exactly where every piece of furniture is.
+function getFurnitureRects(room) {
+  const cx = room.pxCenterX, cy = room.pxCenterY;
+  const items = [];
+  if (room.name === 'Break Room') {
+    items.push({ tex: 'coffeeTex', x: cx - 70, y: cy - 60, w: 48, h: 48, collide: true, isCoffee: true });
+    items.push({ tex: 'couchTex', x: cx + 15, y: cy + 55, w: 96, h: 48, collide: true });
+    items.push({ tex: 'plantTex', x: cx + 90, y: cy - 60, w: 48, h: 48, collide: false });
+  } else if (room.name === 'Meeting Room') {
+    items.push({ tex: 'tableTex', x: cx, y: cy, w: 144, h: 48, collide: true });
+  } else if (room.name === 'Server Room') {
+    items.push({ tex: 'serverTex', x: cx - 60, y: cy - 40, w: 48, h: 96, collide: true });
+    items.push({ tex: 'serverTex', x: cx + 30, y: cy - 40, w: 48, h: 96, collide: true });
+  } else if (room.name === "Manager's Office") {
+    items.push({ tex: 'deskTex', x: cx - 48, y: cy - 65, w: 96, h: 48, collide: true });
+    items.push({ tex: 'shelfTex', x: cx + 75, y: cy - 40, w: 48, h: 96, collide: true });
+    items.push({ tex: 'cabinetTex', x: cx - 80, y: cy + 60, w: 48, h: 48, collide: true });
+    items.push({ tex: 'plantTex', x: cx + 75, y: cy + 60, w: 48, h: 48, collide: false });
+  } else if (room.name === 'Reception') {
+    items.push({ tex: 'deskTex', x: cx - 48, y: cy - 60, w: 96, h: 48, collide: true });
+    items.push({ tex: 'plantTex', x: cx + 90, y: cy + 55, w: 48, h: 48, collide: false });
+    items.push({ tex: 'plantTex', x: cx - 90, y: cy + 55, w: 48, h: 48, collide: false });
+  } else if (room.name === 'Storage Closet') {
+    items.push({ tex: 'shelfTex', x: cx - 70, y: cy - 30, w: 48, h: 96, collide: true });
+    items.push({ tex: 'crateTex', x: cx + 50, y: cy - 50, w: 48, h: 48, collide: true });
+    items.push({ tex: 'crateTex', x: cx + 50, y: cy + 10, w: 48, h: 48, collide: true });
+  }
+  return items;
+}
+
+// Host-only: scatter valued loot across the rooms, avoiding furniture and
+// other loot, producing plain data that gets written to Firebase.
+function buildLootList(rooms) {
+  const furnitureRects = [];
+  rooms.forEach(room => getFurnitureRects(room).filter(it => it.collide).forEach(it => furnitureRects.push(it)));
+
+  const items = [];
+  let idCounter = 0;
+  rooms.forEach(room => {
+    for (let i = 0; i < LOOT_PER_ROOM; i++) {
+      let px, py, placed = false, attempts = 0;
+      while (!placed && attempts < 40) {
+        attempts++;
+        px = randInt(room.px0 + 20, room.px0 + room.pw - 20);
+        py = randInt(room.py0 + 20, room.py0 + room.ph - 20);
+        const overlapsProp = furnitureRects.some(r =>
+          px >= r.x - r.w / 2 - 16 && px <= r.x + r.w / 2 + 16 && py >= r.y - r.h / 2 - 16 && py <= r.y + r.h / 2 + 16
+        );
+        const tooClose = items.some(it => Math.hypot(px - it.x, py - it.y) < 40);
+        placed = !overlapsProp && !tooClose;
+      }
+      if (!placed) continue;
+      const value = randInt(LOOT_MIN_VALUE / 10, LOOT_MAX_VALUE / 10) * 10;
+      items.push({ id: 'loot' + (idCounter++), x: px, y: py, value });
+    }
+  });
+  return items;
+}
+
+// Publishes a fresh round (roles, office layout, loot) to Firebase and flips
+// the room into 'playing'. Used both for the very first round (from the
+// join/create lobby) and for every "next round" after that (from the
+// in-game end-of-round prompt) — same shared logic either way, just a fresh
+// matchStartAt token each time so every client knows to (re)boot the scene.
+async function launchRound(roomRef, ids) {
+  if (ids.length < 2) return false;
+  const roles = assignRoles(ids);
+  const layout = generateOfficeLayout();
+  const loot = buildLootList(layout.rooms);
+
+  const updates = {};
+  ids.forEach(id => { updates['players/' + id + '/role'] = roles[id]; });
+  updates['layout/grid'] = layout.grid;
+  updates['layout/rooms'] = layout.rooms;
+  updates['layout/loot'] = loot;
+  updates['lootTotal'] = 0;
+  updates['matchDurationMs'] = MATCH_SECONDS * 1000;
+  updates['matchStartAt'] = firebase.database.ServerValue.TIMESTAMP;
+  updates['matchResult'] = null;
+  updates['caught'] = null;
+  updates['positions'] = null;
+  updates['lootCollected'] = null;
+  updates['state'] = 'playing';
+
+  await roomRef.update(updates);
+  return true;
+}
+
+// =========================== LOBBY (plain DOM, pre-Phaser) ===========================
+const Lobby = {
+  roomCode: null,
+  isHost: false,
+  roomRef: null,
+  gameScreenShown: false,   // have we ever switched the DOM from lobby -> game view?
+  currentGame: null,        // the live Phaser.Game instance for the current round, if any
+  lastRoundToken: null,     // matchStartAt value we last booted a round for (dedupes reboots)
+
+  init() {
+    if (FIREBASE_NOT_CONFIGURED) {
+      this.showError('Firebase is not set up yet. Open this file in a text editor, find the firebaseConfig object near the top of the <script> section, and paste in your own project\'s config (see the comment above it for the 5-minute setup steps).');
+      document.getElementById('createRoomBtn').disabled = true;
+      document.getElementById('joinRoomBtn').disabled = true;
+      return;
+    }
+    document.getElementById('createRoomBtn').addEventListener('click', () => this.createRoom());
+    document.getElementById('joinRoomBtn').addEventListener('click', () => this.joinRoom());
+    document.getElementById('startMatchBtn').addEventListener('click', () => this.startMatch());
+  },
+
+  getName() {
+    const v = document.getElementById('playerName').value.trim();
+    return v ? v.slice(0, 20) : 'Player';
+  },
+
+  showError(msg) {
+    const el = document.getElementById('lobbyError');
+    el.textContent = msg;
+    el.style.display = 'block';
+  },
+
+  async createRoom() {
+    const code = makeRoomCode();
+    const roomRef = db.ref('rooms/' + code);
+    try {
+      await roomRef.set({
+        createdAt: firebase.database.ServerValue.TIMESTAMP,
+        hostId: MY_ID,
+        state: 'lobby',
+        players: { [MY_ID]: { name: this.getName(), role: null, joinedAt: firebase.database.ServerValue.TIMESTAMP } }
+      });
+      this.registerPresenceCleanup(roomRef);
+      this.enterRoom(code, true);
+    } catch (e) {
+      this.showError('Could not create a room — check your Firebase config and that Realtime Database is enabled. (' + e.message + ')');
+    }
+  },
+
+  async joinRoom() {
+    const code = document.getElementById('joinCodeInput').value.trim().toUpperCase();
+    if (!code) { this.showError('Enter a room code.'); return; }
+    const roomRef = db.ref('rooms/' + code);
+    try {
+      const snap = await roomRef.once('value');
+      if (!snap.exists()) { this.showError('No room found with that code.'); return; }
+      const room = snap.val();
+      if (room.state !== 'lobby') { this.showError('That match has already started.'); return; }
+      const playerCount = room.players ? Object.keys(room.players).length : 0;
+      if (playerCount >= 10) { this.showError('That room is full (10 players max).'); return; }
+      await roomRef.child('players/' + MY_ID).set({
+        name: this.getName(), role: null, joinedAt: firebase.database.ServerValue.TIMESTAMP
+      });
+      this.registerPresenceCleanup(roomRef);
+      this.enterRoom(code, room.hostId === MY_ID);
+    } catch (e) {
+      this.showError('Could not join that room. (' + e.message + ')');
+    }
+  },
+
+  // Without this, a player who closes the tab, loses connection, or just
+  // refreshes the page (which mints a brand new MY_ID on load, orphaning the
+  // old one) leaves a permanent "ghost" entry in players/. launchRound()
+  // assigns a role to every id still under players/, so a ghost can eat the
+  // room's only Nightguard slot (nobody patrols that round) or become a
+  // Thief that can never be marked caught (checkAllThievesCaught() can then
+  // never be satisfied). Registering this the moment we're actually in the
+  // room means Firebase cleans up our own node the instant we disconnect.
+  registerPresenceCleanup(roomRef) {
+    roomRef.child('players/' + MY_ID).onDisconnect().remove();
+    roomRef.child('positions/' + MY_ID).onDisconnect().remove();
+    roomRef.child('caught/' + MY_ID).onDisconnect().remove();
+  },
+
+  enterRoom(code, isHost) {
+    this.roomCode = code;
+    this.isHost = isHost;
+    this.roomRef = db.ref('rooms/' + code);
+
+    document.getElementById('roomCodeDisplay').textContent = code;
+    document.getElementById('roomView').style.display = 'block';
+    document.getElementById('joinCreateView').style.display = 'none';
+    document.getElementById('startMatchBtn').style.display = isHost ? 'inline-block' : 'none';
+    document.getElementById('waitingNote').style.display = isHost ? 'none' : 'block';
+
+    this.roomRef.child('players').on('value', snap => {
+      const players = snap.val() || {};
+      const ul = document.getElementById('playerListUl');
+      ul.innerHTML = '';
+      Object.entries(players).forEach(([id, p]) => {
+        const li = document.createElement('li');
+        li.textContent = p.name + (id === MY_ID ? ' (you)' : '');
+        ul.appendChild(li);
+      });
+      const n = Object.keys(players).length;
+      const gc = guardCountFor(n);
+      document.getElementById('roleRuleNote').textContent =
+        n + ' player' + (n === 1 ? '' : 's') + ' joined -> ' + gc + ' Nightguard' + (gc > 1 ? 's' : '') +
+        ', ' + Math.max(0, n - gc) + ' Thief/Thieves.';
+      document.getElementById('startMatchBtn').disabled = n < 2;
+    });
+
+    // 'state' only drives the one-time DOM switch from the join/create lobby
+    // to the game view. It stays 'playing' for every round after the first —
+    // rounds 2+ never bounce back through this screen or re-share a room
+    // code, they're driven entirely by the matchStartAt listener below —
+    // players simply stay put and the game view rebuilds itself in place.
+    this.roomRef.child('state').on('value', snap => {
+      if (snap.val() === 'playing' && !this.gameScreenShown) {
+        this.gameScreenShown = true;
+        document.getElementById('lobby').style.display = 'none';
+        document.getElementById('game-container').style.display = 'block';
+        document.getElementById('ui').style.display = 'block';
+      }
+    });
+
+    // Fires once for the first round and again every time a "next round"
+    // publishes a fresh matchStartAt — including ones triggered by the
+    // in-game "Start Next Round" button, with no lobby round-trip and no
+    // one needing to rejoin. Tears down the previous round's Phaser game
+    // (and its Firebase listeners) before booting the new one, so nothing
+    // from the finished round keeps writing/reacting in the background.
+    this.roomRef.child('matchStartAt').on('value', snap => {
+      const token = snap.val();
+      if (!token || token === this.lastRoundToken) return;
+      this.lastRoundToken = token;
+      if (this.currentGame) {
+        const prevScene = this.currentGame.scene.getScene('MainScene');
+        if (prevScene && prevScene.teardownFirebaseListeners) prevScene.teardownFirebaseListeners();
+        this.currentGame.destroy(true);
+        this.currentGame = null;
+      }
+      this.roomRef.once('value').then(roomSnap => {
+        this.currentGame = bootGame(this.roomCode, this.roomRef, roomSnap.val());
+      });
+    });
+  },
+
+  async startMatch() {
+    const snap = await this.roomRef.child('players').once('value');
+    const players = snap.val() || {};
+    const ids = Object.keys(players);
+    if (ids.length < 2) { this.showError('Need at least 2 players to start.'); return; }
+    await launchRound(this.roomRef, ids);
+  }
+};
+Lobby.init();
+
+function bootGame(roomCode, roomRef, room) {
+  const myRole = room.players[MY_ID].role;
+  document.getElementById('roleReminder').innerHTML =
+    'You are the <b>' + (myRole === ROLE_GUARD ? 'Nightguard' : 'Thief') + '</b>' +
+    (myRole === ROLE_GUARD
+      ? ' — the map is dark; you only see inside your vision cone (blocked by walls/furniture). Stand at the coffee machine in the Break Room a few seconds, uninterrupted, to refill when drowsy.'
+      : ' — the map is dark; you see a short distance in every direction. Collect $' + LOOT_TARGET + ' in loot before daybreak without getting caught.');
+
+  const config = {
+    type: Phaser.AUTO,
+    width: GRID_W * TILE_SIZE,
+    height: GRID_H * TILE_SIZE,
+    parent: 'game-container',
+    backgroundColor: '#05070d',
+    physics: { default: 'arcade', arcade: { debug: false } },
+    scene: [MainScene]
+  };
+  const game = new Phaser.Game(config);
+  game.scene.start('MainScene', { roomCode, roomRef, myRole, room });
+  return game;
+}
+
+// ---- Phaser scene ----
+class MainScene extends Phaser.Scene {
+  constructor() { super('MainScene'); }
+
+  init(data) {
+    // Phaser auto-starts the first scene once with no data when the Game is
+    // created; we immediately call scene.start with the real data right
+    // after, so this guards that first throwaway pass into a no-op.
+    this.netData = (data && data.room) ? data : null;
+  }
+
+  create() {
+    if (!this.netData) return;
+    const { roomCode, roomRef, myRole, room } = this.netData;
+    this.roomRef = roomRef;
+    this.myRole = myRole;
+    this.players = room.players || {};
+    this.isHost = room.hostId === MY_ID;
+
+    if (!this.textures.exists('thiefTex')) this.buildTextures();
+
+    this.grid = room.layout.grid;
+    this.rooms = room.layout.rooms;
+    this.buildTilemapFromGrid();
+    this.buildOfficeProps();
+    this.computeVisionBlockGrid();
+    this.buildLootFromList(room.layout.loot);
+
+    this.lockerRoomPos = this.findOpenTileNear(1, 1);
+
+    this.matchOver = false;
+    this.lootCollected = 0;
+    this.fatigue = FATIGUE_MAX;
+    this.guardFacing = 0;
+    this.caughtUntil = 0;
+    this.caughtSet = {};      // thiefId -> true, synced from Firebase
+    this.remote = {};         // playerId -> { sprite, role, tx, ty, facing, drowsy, nameTag }
+
+    this.visionGfx = this.add.graphics().setDepth(4);
+    // Fatigue bar / Zzz / coffee-channel text float just above the player's own
+    // head, so they need to sit ABOVE the darkness overlay (depth 10 below) —
+    // otherwise a guard facing the "wrong" way couldn't see their own HUD.
+    this.fatigueBarGfx = this.add.graphics().setDepth(16);
+    this.zzzText = this.add.text(0, 0, 'Zzz...', {
+      fontFamily: 'Arial', fontSize: '14px', color: '#cfe0ff', fontStyle: 'italic bold',
+      stroke: '#0a1030', strokeThickness: 3
+    }).setOrigin(0.5).setDepth(16).setVisible(false);
+    this.coffeeChannelText = this.add.text(0, 0, '', {
+      fontFamily: 'Arial', fontSize: '13px', color: '#ffe066', fontStyle: 'bold',
+      stroke: '#3a2c00', strokeThickness: 3
+    }).setOrigin(0.5).setDepth(16).setVisible(false);
+    this.caughtText = this.add.text(0, 0, 'CAUGHT!', {
+      fontFamily: 'Arial', fontSize: '40px', color: '#ff4d4d', fontStyle: 'bold',
+      stroke: '#3a0000', strokeThickness: 6
+    }).setOrigin(0.5).setDepth(20).setVisible(false);
+
+    const mapPxW = GRID_W * TILE_SIZE, mapPxH = GRID_H * TILE_SIZE;
+
+    // ---- Darkness / fog of war ----
+    // The lit area is the raycast visibility polygon (the torch beam); the
+    // darkness is its exact geometric complement, drawn as ordinary filled
+    // polygons into this one Graphics object. fillPath() is the same call that
+    // already renders the beam itself, so it is known to work here — unlike
+    // geometry masks and RenderTexture.erase(), which both silently rendered
+    // nothing in this build. Nothing is tile-quantised: the shadow edge lands
+    // exactly on the beam edge.
+    this.darkGfx = this.add.graphics().setDepth(9);
+    this.coffeeChannelMs = 0;
+
+    this.lootText = this.add.text(mapPxW - 10, 10, '', {
+      fontFamily: 'Arial', fontSize: '18px', color: '#fff6c9', fontStyle: 'bold',
+      stroke: '#3a2c00', strokeThickness: 4
+    }).setOrigin(1, 0).setDepth(30).setScrollFactor(0);
+    this.timerText = this.add.text(mapPxW - 10, 34, '', {
+      fontFamily: 'Arial', fontSize: '16px', color: '#cfe0ff',
+      stroke: '#0a1030', strokeThickness: 4
+    }).setOrigin(1, 0).setDepth(30).setScrollFactor(0);
+    // Nightguard-only compass to the coffee machine — with real darkness now in
+    // place, the "BREAK ROOM" label is just as hidden as everything else until
+    // you're already standing in it, so without this there'd be no way to find
+    // it from across the map. Fixed HUD position, always above the fog.
+    this.coffeeDirText = this.add.text(10, 34, '', {
+      fontFamily: 'Arial', fontSize: '15px', color: '#ffd166', fontStyle: 'bold',
+      stroke: '#3a2c00', strokeThickness: 4
+    }).setOrigin(0, 0).setDepth(30).setScrollFactor(0).setVisible(false);
+    this.matchBanner = this.add.text(mapPxW / 2, mapPxH / 2, '', {
+      fontFamily: 'Arial', fontSize: '30px', fontStyle: 'bold', align: 'center',
+      color: '#ffffff', stroke: '#000000', strokeThickness: 6,
+      backgroundColor: '#000000aa', padding: { x: 22, y: 16 }
+    }).setOrigin(0.5).setDepth(40).setScrollFactor(0).setVisible(false);
+    this.spectatingText = this.add.text(mapPxW / 2, 16, '', {
+      fontFamily: 'Arial', fontSize: '14px', color: '#ffe066', fontStyle: 'bold',
+      backgroundColor: '#000000aa', padding: { x: 10, y: 5 }
+    }).setOrigin(0.5, 0).setDepth(30).setScrollFactor(0).setVisible(false);
+    this.debugText = this.add.text(6, GRID_H * TILE_SIZE - 60, '', {
+      fontFamily: 'monospace', fontSize: '12px', color: '#00ff88',
+      backgroundColor: '#00000099', padding: { x: 6, y: 4 }
+    }).setDepth(30).setScrollFactor(0);
+
+    this.matchStartAt = room.matchStartAt;
+    this.matchDurationMs = room.matchDurationMs;
+
+    // My own character
+    const spawnCorner = myRole === ROLE_GUARD ? { c: GRID_W - 2, r: 1 } : { c: 1, r: GRID_H - 2 };
+    const spawn = this.findOpenTileNear(spawnCorner.c, spawnCorner.r);
+    this.me = this.physics.add.sprite(
+      spawn.x + Phaser.Math.Between(-16, 16), spawn.y + Phaser.Math.Between(-16, 16),
+      myRole === ROLE_GUARD ? 'guardTex' : 'thiefTex'
+    );
+    this.me.body.setCircle(15, 7, 13);
+    this.me.body.setCollideWorldBounds(true);
+    // Above the fog layer (depth 10) so you can always see your own character —
+    // you're always standing at the apex of your own cone / center of your own
+    // sight radius anyway, this just guards against edge-of-cone clipping.
+    this.me.setDepth(12);
+    this.physics.add.collider(this.me, this.wallLayer);
+    this.physics.add.collider(this.me, this.propsGroup);
+
+    this.physics.add.overlap(this.me, this.lootGroup, (me, sprite) => this.collectLoot(sprite), null, this);
+
+    this.wasd = this.input.keyboard.addKeys({ up: 'W', down: 'S', left: 'A', right: 'D' });
+    this.cursors = this.input.keyboard.createCursorKeys();
+
+    this.physics.world.setBounds(0, 0, mapPxW, mapPxH);
+    this.cameras.main.setBounds(0, 0, mapPxW, mapPxH);
+    this.cameras.main.centerOn(mapPxW / 2, mapPxH / 2);
+
+    // Remote players: one sprite per other player, position-synced via Firebase
+    Object.entries(this.players).forEach(([id, p]) => {
+      if (id === MY_ID) return;
+      this.addRemotePlayer(id, p.role, p.name);
+    });
+
+    this.lastSentAt = 0;
+    this.setupFirebaseListeners();
+
+    if (this.myRole === ROLE_THIEF) this.updateLootText();
+  }
+
+  addRemotePlayer(id, role, name) {
+    const sprite = this.add.sprite(-100, -100, role === ROLE_GUARD ? 'guardTex' : 'thiefTex').setDepth(5);
+    const nameTag = this.add.text(-100, -100, name || 'Player', {
+      fontFamily: 'Arial', fontSize: '11px', color: '#eef1ff', stroke: '#000000', strokeThickness: 3
+    }).setOrigin(0.5, 1).setDepth(6);
+    this.remote[id] = { sprite, nameTag, role, tx: sprite.x, ty: sprite.y, facing: 0, drowsy: false };
+  }
+
+  // Every callback is kept on `this` so teardownFirebaseListeners() can
+  // remove exactly this scene's listeners (by callback reference) when a
+  // new round tears this scene down — without touching Lobby's own
+  // long-lived listener on this same 'players' path (calling .off() with no
+  // callback removes ALL listeners at that path, which would kill Lobby's
+  // player list too, so every .off() below names its callback explicitly).
+  setupFirebaseListeners() {
+    const roomRef = this.roomRef;
+
+    this._cbPositions = snap => {
+      const all = snap.val() || {};
+      Object.entries(all).forEach(([id, pos]) => {
+        if (id === MY_ID) return;
+        if (!this.remote[id]) this.addRemotePlayer(id, pos.role, pos.name);
+        const r = this.remote[id];
+        r.tx = pos.x; r.ty = pos.y; r.facing = pos.facing || 0; r.drowsy = !!pos.drowsy;
+      });
+    };
+    roomRef.child('positions').on('value', this._cbPositions);
+
+    this._cbCaught = snap => {
+      this.caughtSet = snap.val() || {};
+      if (this.myRole === ROLE_THIEF && this.caughtSet[MY_ID] && this.caughtUntil === 0 && !this.matchOver) {
+        this.onIAmCaught();
+      }
+      this.checkAllThievesCaught();
+    };
+    roomRef.child('caught').on('value', this._cbCaught);
+
+    this._cbLootTotal = snap => {
+      this.lootCollected = snap.val() || 0;
+      this.updateLootText();
+      if (this.lootCollected >= LOOT_TARGET) this.tryEndMatch('thief', 'Target reached! The Thieves made off with the goods.');
+    };
+    roomRef.child('lootTotal').on('value', this._cbLootTotal);
+
+    this._cbLootCollected = snap => {
+      const collected = snap.val() || {};
+      this.lootItems.forEach(item => {
+        const shouldHide = !!collected[item.id];
+        if (shouldHide && item.sprite.active) { item.sprite.setActive(false).setVisible(false); item.label.setVisible(false); }
+      });
+    };
+    roomRef.child('lootCollected').on('value', this._cbLootCollected);
+
+    this._cbMatchResult = snap => {
+      const result = snap.val();
+      if (result && !this.matchOver) this.showEndBanner(result.winner, result.message);
+    };
+    roomRef.child('matchResult').on('value', this._cbMatchResult);
+
+    this._cbScenePlayers = snap => {
+      this.players = snap.val() || {};
+      // A player who disconnects (or was already a stale ghost before
+      // registerPresenceCleanup existed) is now gone from players/, but their
+      // sprite/nameTag stay in `this.remote` — nothing else ever removes
+      // them, so without this they'd freeze in place for the rest of the
+      // round instead of disappearing.
+      Object.keys(this.remote).forEach(id => {
+        if (this.players[id]) return;
+        const r = this.remote[id];
+        r.sprite.destroy();
+        r.nameTag.destroy();
+        delete this.remote[id];
+      });
+    };
+    roomRef.child('players').on('value', this._cbScenePlayers);
+  }
+
+  teardownFirebaseListeners() {
+    const roomRef = this.roomRef;
+    if (this._cbPositions) roomRef.child('positions').off('value', this._cbPositions);
+    if (this._cbCaught) roomRef.child('caught').off('value', this._cbCaught);
+    if (this._cbLootTotal) roomRef.child('lootTotal').off('value', this._cbLootTotal);
+    if (this._cbLootCollected) roomRef.child('lootCollected').off('value', this._cbLootCollected);
+    if (this._cbMatchResult) roomRef.child('matchResult').off('value', this._cbMatchResult);
+    if (this._cbScenePlayers) roomRef.child('players').off('value', this._cbScenePlayers);
+  }
+
+  updateLootText() {
+    if (this.myRole === ROLE_THIEF || true) this.lootText.setText(`$${this.lootCollected} / $${LOOT_TARGET}`);
+  }
+
+  checkAllThievesCaught() {
+    const thiefIds = Object.entries(this.players).filter(([id, p]) => p.role === ROLE_THIEF).map(([id]) => id);
+    if (thiefIds.length === 0) return;
+    const allCaught = thiefIds.every(id => this.caughtSet[id]);
+    if (allCaught) this.tryEndMatch('nightguard', 'Every Thief was caught!');
+  }
+
+  tryEndMatch(winner, message) {
+    if (this.matchOver) return;
+    this.roomRef.child('matchResult').transaction(current => (current ? undefined : { winner, message }));
+  }
+
+  showEndBanner(winner, message) {
+    this.matchOver = true;
+    if (this.me && this.me.body) this.me.body.setVelocity(0, 0);
+    const label = winner === 'thief' ? 'THIEVES WIN!' : 'NIGHTGUARD WINS!';
+    const color = winner === 'thief' ? '#5cff8a' : '#ff4d4d';
+    this.matchBanner.setColor(color).setText(label + '\n' + message).setVisible(true);
+    this.showNextRoundPrompt();
+  }
+
+  // Everyone stays in the same room between rounds — no rejoining, no new
+  // code. The host gets a clickable prompt; everyone else gets a status
+  // line. Clicking it publishes a fresh round straight to Firebase (new
+  // roles/layout/loot, a new matchStartAt), and Lobby's matchStartAt
+  // listener on every client — including this one — tears this scene down
+  // and boots a new one automatically.
+  showNextRoundPrompt() {
+    const mapPxW = GRID_W * TILE_SIZE, mapPxH = GRID_H * TILE_SIZE;
+    const y = mapPxH / 2 + 74;
+    if (this.isHost) {
+      this.nextRoundBtn = this.add.text(mapPxW / 2, y, '▶  Start Next Round', {
+        fontFamily: 'Arial', fontSize: '20px', fontStyle: 'bold', color: '#241a00',
+        backgroundColor: '#ffd166', padding: { x: 16, y: 10 }
+      }).setOrigin(0.5).setDepth(40).setScrollFactor(0).setInteractive({ useHandCursor: true });
+      this.nextRoundBtn.on('pointerdown', () => this.hostStartNextRound());
+    } else {
+      this.add.text(mapPxW / 2, y, 'Waiting for the host to start the next round…', {
+        fontFamily: 'Arial', fontSize: '15px', color: '#ffe066',
+        backgroundColor: '#000000aa', padding: { x: 12, y: 8 }
+      }).setOrigin(0.5).setDepth(40).setScrollFactor(0);
+    }
+  }
+
+  async hostStartNextRound() {
+    if (this.nextRoundBtn) {
+      this.nextRoundBtn.disableInteractive();
+      this.nextRoundBtn.setText('Starting next round…');
+    }
+    const snap = await this.roomRef.child('players').once('value');
+    const players = snap.val() || {};
+    const ids = Object.keys(players);
+    if (ids.length < 2) {
+      // Not enough players left to start another round — leave the banner
+      // up rather than silently doing nothing.
+      if (this.nextRoundBtn) this.nextRoundBtn.setText('Need at least 2 players to start');
+      return;
+    }
+    await launchRound(this.roomRef, ids);
+    // No further action here: the fresh matchStartAt this just published
+    // will make Lobby's listener destroy this scene and boot the next
+    // round for every client, this one included.
+  }
+
+  onIAmCaught() {
+    this.caughtUntil = -1; // sentinel: "caught, permanently spectating" for this round
+    this.caughtText.setPosition(this.me.x, this.me.y - 40).setVisible(true);
+    this.me.body.setVelocity(0, 0);
+    this.spectatingText.setText("You're in the Locker Room — spectating the rest of the round").setVisible(true);
+    this.time.delayedCall(CAUGHT_FREEZE_MS, () => this.caughtText.setVisible(false));
+  }
+
+  // ---- textures ----
+  buildTextures() {
+    const g = this.add.graphics();
+
+    g.fillStyle(0xd7dbe2, 1); g.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
+    g.lineStyle(1, 0xc3c8d1, 1); g.strokeRect(0, 0, TILE_SIZE, TILE_SIZE);
+    g.generateTexture('floorTile', TILE_SIZE, TILE_SIZE);
+
+    g.clear();
+    g.fillStyle(0x2b2f7a, 1); g.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
+    g.fillStyle(0x4655c9, 1); g.fillRoundedRect(4, 4, TILE_SIZE - 8, TILE_SIZE - 8, 6);
+    g.lineStyle(2, 0x1c2060, 1); g.strokeRoundedRect(4, 4, TILE_SIZE - 8, TILE_SIZE - 8, 6);
+    g.generateTexture('wallTile', TILE_SIZE, TILE_SIZE);
+
+    g.clear();
+    g.fillStyle(0xa9793f, 1); g.fillRoundedRect(0, 6, TILE_SIZE * 2, TILE_SIZE - 6, 8);
+    g.lineStyle(2, 0x7a531f, 1); g.strokeRoundedRect(0, 6, TILE_SIZE * 2, TILE_SIZE - 6, 8);
+    g.fillStyle(0x2b2f36, 1); g.fillRoundedRect(TILE_SIZE * 2 - 42, 10, 30, 20, 3);
+    g.fillStyle(0x6be0ff, 0.85); g.fillRect(TILE_SIZE * 2 - 39, 13, 24, 14);
+    g.generateTexture('deskTex', TILE_SIZE * 2, TILE_SIZE);
+
+    g.clear();
+    g.fillStyle(0x3a3f47, 1); g.fillRoundedRect(6, 4, TILE_SIZE - 12, TILE_SIZE - 8, 6);
+    g.fillStyle(0x6d7480, 1); g.fillRoundedRect(10, 10, TILE_SIZE - 20, 10, 3);
+    g.fillStyle(0xffb15e, 1); g.fillCircle(TILE_SIZE / 2, TILE_SIZE - 14, 4);
+    g.generateTexture('coffeeTex', TILE_SIZE, TILE_SIZE);
+
+    g.clear();
+    g.fillStyle(0x4fa3a3, 1); g.fillRoundedRect(0, 8, TILE_SIZE * 2, TILE_SIZE - 12, 12);
+    g.fillStyle(0x3a7d7d, 1); g.fillRoundedRect(0, 8, 16, TILE_SIZE - 12, 8);
+    g.fillStyle(0x3a7d7d, 1); g.fillRoundedRect(TILE_SIZE * 2 - 16, 8, 16, TILE_SIZE - 12, 8);
+    g.generateTexture('couchTex', TILE_SIZE * 2, TILE_SIZE);
+
+    g.clear();
+    g.fillStyle(0x8a683f, 1); g.fillRoundedRect(0, 0, TILE_SIZE * 3, TILE_SIZE, 8);
+    g.lineStyle(2, 0x624a2c, 1); g.strokeRoundedRect(0, 0, TILE_SIZE * 3, TILE_SIZE, 8);
+    g.generateTexture('tableTex', TILE_SIZE * 3, TILE_SIZE);
+
+    g.clear();
+    g.fillStyle(0x393f4a, 1); g.fillRoundedRect(4, 0, TILE_SIZE - 8, TILE_SIZE * 2, 6);
+    for (let i = 0; i < 5; i++) {
+      g.fillStyle(i % 2 === 0 ? 0x6be0ff : 0x74e08a, 1);
+      g.fillRect(10, 8 + i * 16, 6, 6);
+    }
+    g.generateTexture('serverTex', TILE_SIZE, TILE_SIZE * 2);
+
+    g.clear();
+    g.fillStyle(0x8a683f, 1); g.fillRoundedRect(0, 0, TILE_SIZE, TILE_SIZE * 2, 4);
+    g.fillStyle(0x624a2c, 1);
+    for (let i = 0; i < 3; i++) g.fillRect(4, 6 + i * 30, TILE_SIZE - 8, 4);
+    g.generateTexture('shelfTex', TILE_SIZE, TILE_SIZE * 2);
+
+    g.clear();
+    g.fillStyle(0x8b93a0, 1); g.fillRoundedRect(6, 2, TILE_SIZE - 12, TILE_SIZE - 4, 4);
+    g.fillStyle(0x6b7280, 1);
+    g.fillRect(9, 8, TILE_SIZE - 18, 4);
+    g.fillRect(9, 22, TILE_SIZE - 18, 4);
+    g.generateTexture('cabinetTex', TILE_SIZE, TILE_SIZE);
+
+    g.clear();
+    g.fillStyle(0xb5895a, 1); g.fillRoundedRect(6, 6, TILE_SIZE - 12, TILE_SIZE - 12, 3);
+    g.lineStyle(2, 0x8a6238, 1); g.strokeRoundedRect(6, 6, TILE_SIZE - 12, TILE_SIZE - 12, 3);
+    g.lineBetween(6, TILE_SIZE / 2, TILE_SIZE - 6, TILE_SIZE / 2);
+    g.lineBetween(TILE_SIZE / 2, 6, TILE_SIZE / 2, TILE_SIZE - 6);
+    g.generateTexture('crateTex', TILE_SIZE, TILE_SIZE);
+
+    g.clear();
+    g.fillStyle(0xffd700, 1); g.fillCircle(12, 12, 11);
+    g.lineStyle(2, 0xb8860b, 1); g.strokeCircle(12, 12, 11);
+    g.fillStyle(0xb8860b, 1); g.fillRect(11, 5, 2, 14);
+    g.generateTexture('lootTex', 24, 24);
+
+    g.clear();
+    g.fillStyle(0x8a683f, 1); g.fillRect(TILE_SIZE / 2 - 8, TILE_SIZE - 14, 16, 12);
+    g.fillStyle(0x4caf68, 1); g.fillCircle(TILE_SIZE / 2, TILE_SIZE / 2 - 2, 14);
+    g.generateTexture('plantTex', TILE_SIZE, TILE_SIZE);
+
+    this.buildCharacterTexture(g, 'thiefTex', 0x3ad1ff, 0x1c7e99);
+    this.buildCharacterTexture(g, 'guardTex', 0xff8c3a, 0x9c4f1c);
+
+    g.destroy();
+  }
+
+  buildCharacterTexture(g, key, mainColor, outlineColor) {
+    const W = 44, H = 56;
+    g.clear();
+    g.fillStyle(0x000000, 0.28); g.fillEllipse(W / 2, H - 6, 24, 9);
+    g.fillStyle(outlineColor, 1); g.fillRoundedRect(3, 3, W - 6, H - 16, 17);
+    g.fillStyle(mainColor, 1); g.fillRoundedRect(7, 6, W - 14, H - 22, 14);
+    g.fillStyle(0xcdeffa, 0.95); g.fillEllipse(W / 2 + 6, 20, 16, 12);
+    g.lineStyle(2, 0x577c86, 0.7); g.strokeEllipse(W / 2 + 6, 20, 16, 12);
+    g.generateTexture(key, W, H);
+  }
+
+  // ---- world building from synced data (no local randomness here) ----
+  buildTilemapFromGrid() {
+    const map = this.make.tilemap({ tileWidth: TILE_SIZE, tileHeight: TILE_SIZE, width: GRID_W, height: GRID_H });
+
+    const tsCanvas = document.createElement('canvas');
+    tsCanvas.width = TILE_SIZE * 2; tsCanvas.height = TILE_SIZE;
+    const ctx = tsCanvas.getContext('2d');
+    ctx.drawImage(this.textures.get('floorTile').getSourceImage(), 0, 0);
+    ctx.drawImage(this.textures.get('wallTile').getSourceImage(), TILE_SIZE, 0);
+    if (this.textures.exists('tileset')) this.textures.remove('tileset');
+    this.textures.addCanvas('tileset', tsCanvas);
+
+    const tileset = map.addTilesetImage('tileset', 'tileset', TILE_SIZE, TILE_SIZE, 0, 0);
+    const layer = map.createBlankLayer('layer', tileset);
+    for (let y = 0; y < GRID_H; y++) for (let x = 0; x < GRID_W; x++) layer.putTileAt(this.grid[y][x] === WALL ? 1 : 0, x, y);
+    layer.setCollisionByExclusion([0]);
+    layer.setDepth(0);
+    this.wallLayer = layer;
+
+    this.rooms.forEach(room => {
+      this.add.rectangle(room.pxCenterX, room.pxCenterY, room.pw - 4, room.ph - 4, room.floorColor, 0.65).setDepth(1);
+    });
+  }
+
+  buildOfficeProps() {
+    this.propsGroup = this.physics.add.staticGroup();
+    this.coffeeMachinePos = null;
+
+    this.rooms.forEach(room => {
+      this.add.text(room.pxCenterX, room.py0 - 14, room.name.toUpperCase(), {
+        fontFamily: 'Arial', fontSize: '14px', color: '#eef1ff', fontStyle: 'bold',
+        stroke: '#20244a', strokeThickness: 4
+      }).setOrigin(0.5, 1).setDepth(6);
+
+      getFurnitureRects(room).forEach(it => {
+        if (it.collide) {
+          const p = this.propsGroup.create(it.x, it.y, it.tex);
+          p.setDepth(3);
+        } else {
+          this.add.image(it.x, it.y, it.tex).setDepth(2);
+        }
+        if (it.isCoffee) this.coffeeMachinePos = { x: it.x, y: it.y };
+      });
+    });
+
+    if (!this.coffeeMachinePos) this.coffeeMachinePos = { x: (GRID_W * TILE_SIZE) / 2, y: (GRID_H * TILE_SIZE) / 2 };
+  }
+
+  buildLootFromList(lootList) {
+    this.lootGroup = this.physics.add.staticGroup();
+    this.lootItems = (lootList || []).map(it => {
+      const sprite = this.lootGroup.create(it.x, it.y, 'lootTex');
+      sprite.setDepth(3);
+      const label = this.add.text(it.x, it.y - 20, '$' + it.value, {
+        fontFamily: 'Arial', fontSize: '12px', color: '#fff6c9', fontStyle: 'bold',
+        stroke: '#3a2c00', strokeThickness: 3
+      }).setOrigin(0.5).setDepth(4);
+      return { id: it.id, sprite, label, value: it.value };
+    });
+  }
+
+  collectLoot(sprite) {
+    if (this.matchOver || this.myRole !== ROLE_THIEF || this.caughtUntil === -1) return;
+    const item = this.lootItems.find(it => it.sprite === sprite);
+    if (!item || !item.sprite.active) return;
+    // Hide it immediately and locally (both active, so the overlap can't refire, AND
+    // visible, so it actually disappears for the person who picked it up) instead of
+    // waiting on the network round-trip — the previous version only set it inactive,
+    // which left it fully visible on screen until a page refresh.
+    item.sprite.setActive(false).setVisible(false);
+    item.label.setVisible(false);
+    const value = item.value;
+    this.roomRef.child('lootCollected/' + item.id).transaction(
+      current => (current ? undefined : true),
+      (error, committed, snapshot) => {
+        if (committed && snapshot.val() === true) {
+          this.roomRef.child('lootTotal').transaction(cur => (cur || 0) + value);
+        }
+      }
+    );
+  }
+
+  computeVisionBlockGrid() {
+    const block = this.grid.map(row => row.map(c => c === WALL));
+    this.propsGroup.children.iterate(child => {
+      if (!child) return;
+      const b = child.getBounds();
+      const x0 = Math.max(0, Math.floor(b.left / TILE_SIZE));
+      const x1 = Math.min(GRID_W - 1, Math.floor((b.right - 1) / TILE_SIZE));
+      const y0 = Math.max(0, Math.floor(b.top / TILE_SIZE));
+      const y1 = Math.min(GRID_H - 1, Math.floor((b.bottom - 1) / TILE_SIZE));
+      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) block[y][x] = true;
+    });
+    this.visionBlock = block;
+  }
+
+  isBlockedAt(px, py) {
+    const gx = Math.floor(px / TILE_SIZE), gy = Math.floor(py / TILE_SIZE);
+    if (gx < 0 || gx >= GRID_W || gy < 0 || gy >= GRID_H) return true;
+    return this.visionBlock[gy][gx];
+  }
+
+  castRay(ox, oy, angle, maxRange) {
+    const dx = Math.cos(angle), dy = Math.sin(angle);
+    let dist = 0, lastX = ox, lastY = oy;
+    while (dist < maxRange) {
+      dist = Math.min(dist + MARCH_STEP, maxRange);
+      const px = ox + dx * dist, py = oy + dy * dist;
+      if (this.isBlockedAt(px, py)) return { x: lastX, y: lastY };
+      lastX = px; lastY = py;
+    }
+    return { x: lastX, y: lastY };
+  }
+
+  hasLineOfSight(ox, oy, tx, ty) {
+    const dist = Phaser.Math.Distance.Between(ox, oy, tx, ty);
+    const angle = Math.atan2(ty - oy, tx - ox);
+    const steps = Math.max(1, Math.ceil(dist / MARCH_STEP));
+    for (let i = 1; i <= steps; i++) {
+      const d = (i / steps) * dist;
+      if (this.isBlockedAt(ox + Math.cos(angle) * d, oy + Math.sin(angle) * d)) return false;
+    }
+    return true;
+  }
+
+  // Uniformly-spaced rays alone can "notch" the beam: two neighbouring rays,
+  // sampled independently, can disagree right at a wall/furniture corner —
+  // one just clears it, one just misses — and connecting their endpoints with
+  // a straight line cuts a false bite out of open floor. So we also cast a
+  // pair of rays straddling every nearby blocking-tile corner, which makes the
+  // polygon snap to the true silhouette edge.
+  buildSweepAngles(gx, gy, startAngle, endAngle, range, steps) {
+    const angles = [];
+    for (let i = 0; i <= steps; i++) angles.push(startAngle + (i / steps) * (endAngle - startAngle));
+    const EPS = 0.0009, TAU = Math.PI * 2;
+    const minGX = Math.max(0, Math.floor((gx - range) / TILE_SIZE));
+    const maxGX = Math.min(GRID_W - 1, Math.floor((gx + range) / TILE_SIZE));
+    const minGY = Math.max(0, Math.floor((gy - range) / TILE_SIZE));
+    const maxGY = Math.min(GRID_H - 1, Math.floor((gy + range) / TILE_SIZE));
+    for (let ty = minGY; ty <= maxGY; ty++) {
+      for (let tx = minGX; tx <= maxGX; tx++) {
+        if (!this.visionBlock[ty][tx]) continue;
+        const cs = [[tx, ty], [tx + 1, ty], [tx, ty + 1], [tx + 1, ty + 1]];
+        for (let k = 0; k < 4; k++) {
+          const cx = cs[k][0] * TILE_SIZE, cy = cs[k][1] * TILE_SIZE;
+          const dx = cx - gx, dy = cy - gy;
+          if (Math.hypot(dx, dy) > range) continue;
+          let a = Math.atan2(dy, dx);
+          while (a < startAngle) a += TAU;
+          while (a >= startAngle + TAU) a -= TAU;
+          if (a > startAngle && a < endAngle) angles.push(a - EPS, a + EPS);
+        }
+      }
+    }
+    angles.sort((a, b) => a - b);
+    return angles;
+  }
+
+  // One angular sweep of the torch: the angles cast, and where each ray died.
+  castSweep(ox, oy, startAngle, endAngle, range, steps) {
+    const angles = this.buildSweepAngles(ox, oy, startAngle, endAngle, range, steps);
+    return { angles, points: angles.map(a => this.castRay(ox, oy, a, range)) };
+  }
+
+  // A plain, UNOCCLUDED ring of sample points at a fixed radius — no raycast,
+  // no wall/furniture blocking, just geometry. This is what the Thief's
+  // ambient glow uses: a flat 360-degree dim circle around them, not a
+  // torch/cone that gets cut into wedges by walls. Same {angles, points}
+  // shape as castSweep() so it plugs straight into drawDarkness().
+  buildCircleSweep(ox, oy, startAngle, endAngle, radius, steps) {
+    const angles = [];
+    for (let i = 0; i <= steps; i++) angles.push(startAngle + (endAngle - startAngle) * (i / steps));
+    const points = angles.map(a => ({ x: ox + Math.cos(a) * radius, y: oy + Math.sin(a) * radius }));
+    return { angles, points };
+  }
+
+  // Where the ray from (ox,oy) at `angle` leaves the map rectangle.
+  rectExit(ox, oy, angle) {
+    const W = GRID_W * TILE_SIZE, H = GRID_H * TILE_SIZE;
+    const dx = Math.cos(angle), dy = Math.sin(angle);
+    let t = Infinity;
+    if (dx > 1e-9) t = Math.min(t, (W - ox) / dx);
+    else if (dx < -1e-9) t = Math.min(t, -ox / dx);
+    if (dy > 1e-9) t = Math.min(t, (H - oy) / dy);
+    else if (dy < -1e-9) t = Math.min(t, -oy / dy);
+    if (!isFinite(t)) t = Math.max(W, H) * 2;
+    return { x: ox + dx * t, y: oy + dy * t };
+  }
+
+  // Map corners whose bearing from (ox,oy) lies strictly inside (a0,a1),
+  // in increasing bearing — needed so a shadow polygon that spans a corner of
+  // the map wraps around it instead of cutting straight across.
+  cornersBetween(ox, oy, a0, a1) {
+    const W = GRID_W * TILE_SIZE, H = GRID_H * TILE_SIZE, TAU = Math.PI * 2;
+    const corners = [[0, 0], [W, 0], [W, H], [0, H]], out = [];
+    for (let i = 0; i < 4; i++) {
+      const cx = corners[i][0], cy = corners[i][1];
+      let a = Math.atan2(cy - oy, cx - ox);
+      while (a < a0) a += TAU;
+      while (a >= a0 + TAU) a -= TAU;
+      if (a > a0 && a < a1) out.push({ x: cx, y: cy, a });
+    }
+    out.sort((p, q) => p.a - q.a);
+    return out;
+  }
+
+  fillDarkPoly(poly) {
+    if (poly.length < 3) return;
+    this.darkGfx.beginPath();
+    this.darkGfx.moveTo(poly[0].x, poly[0].y);
+    for (let i = 1; i < poly.length; i++) this.darkGfx.lineTo(poly[i].x, poly[i].y);
+    this.darkGfx.closePath();
+    this.darkGfx.fillPath();
+  }
+
+  // Paints the exact complement of the lit area. Two kinds of shadow:
+  //   1. beyond the beam — per sweep, the band between the visibility arc and
+  //      the map edge (inner chain = the arc, outer chain = the map boundary
+  //      walked back the other way);
+  //   2. outside the beam's angular span — one fan from the player around the
+  //      back (skipped for a Thief, whose sweeps already cover all 360).
+  // Then the lit area itself gets a light tint, so even what you can see is a
+  // little dim rather than full brightness.
+  drawDarkness(ox, oy, sweeps, outerDarkness, innerDarkness, fullCircle) {
+    this.darkGfx.clear();
+    if (outerDarkness > 0) {
+      this.darkGfx.fillStyle(0x000000, outerDarkness);
+      sweeps.forEach(s => {
+        const n = s.points.length;
+        if (n < 2) return;
+        const poly = s.points.slice();
+        poly.push(this.rectExit(ox, oy, s.angles[n - 1]));
+        const corners = this.cornersBetween(ox, oy, s.angles[0], s.angles[n - 1]);
+        for (let i = corners.length - 1; i >= 0; i--) poly.push(corners[i]);
+        poly.push(this.rectExit(ox, oy, s.angles[0]));
+        this.fillDarkPoly(poly);
+      });
+      if (!fullCircle && sweeps.length) {
+        const firstAngle = sweeps[0].angles[0];
+        const lastAngles = sweeps[sweeps.length - 1].angles;
+        const lastAngle = lastAngles[lastAngles.length - 1];
+        const poly = [{ x: ox, y: oy }, this.rectExit(ox, oy, lastAngle)];
+        this.cornersBetween(ox, oy, lastAngle, firstAngle + Math.PI * 2).forEach(c => poly.push(c));
+        poly.push(this.rectExit(ox, oy, firstAngle));
+        this.fillDarkPoly(poly);
+      }
+    }
+    if (innerDarkness > 0) {
+      this.darkGfx.fillStyle(0x000000, innerDarkness);
+      sweeps.forEach(s => this.fillDarkPoly([{ x: ox, y: oy }].concat(s.points)));
+    }
+  }
+
+  findOpenTileNear(startCol, startRow) {
+    const queue = [[startCol, startRow]];
+    const seen = new Set([`${startCol},${startRow}`]);
+    while (queue.length) {
+      const [cx, cy] = queue.shift();
+      if (cx >= 0 && cx < GRID_W && cy >= 0 && cy < GRID_H && this.grid[cy][cx] === FLOOR) {
+        return { x: cx * TILE_SIZE + TILE_SIZE / 2, y: cy * TILE_SIZE + TILE_SIZE / 2 };
+      }
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = cx + dx, ny = cy + dy;
+        const key = `${nx},${ny}`;
+        if (nx >= 0 && nx < GRID_W && ny >= 0 && ny < GRID_H && !seen.has(key)) { seen.add(key); queue.push([nx, ny]); }
+      }
+    }
+    return { x: TILE_SIZE * 1.5, y: TILE_SIZE * 1.5 };
+  }
+
+  // My own vision cone (only rendered/used if I'm the Nightguard) — checks
+  // against every synced Thief position and reports catches to Firebase.
+  updateMyVisionCone() {
+    const gx = this.me.x, gy = this.me.y;
+    const drowsy = this.fatigue <= 0;
+    const visionRange = drowsy ? VISION_RANGE * DROWSY_RANGE_MULT : VISION_RANGE;
+    const halfAngleDeg = drowsy ? VISION_HALF_ANGLE_DEG * DROWSY_ANGLE_MULT : VISION_HALF_ANGLE_DEG;
+    const halfAngle = Phaser.Math.DegToRad(halfAngleDeg);
+
+    let nearestThiefDist = null, sawSomeone = false;
+    Object.entries(this.remote).forEach(([id, r]) => {
+      // Caught players are always shown (frozen, dimmed, in the locker room) —
+      // everyone else is only visible if they're actually inside my cone right
+      // now. This is a hard on/off switch, independent of the dim ambient
+      // overlay below, so a Thief standing just outside the cone is completely
+      // invisible rather than faintly showing through the darkness.
+      if (this.caughtSet[id]) { r.sprite.setVisible(true); r.nameTag.setVisible(true); return; }
+      const dx = r.tx - gx, dy = r.ty - gy;
+      const dist = Math.hypot(dx, dy);
+      const angleToThief = Math.atan2(dy, dx);
+      const diff = Phaser.Math.Angle.Wrap(angleToThief - this.guardFacing);
+      const inRange = dist <= visionRange, inAngle = Math.abs(diff) <= halfAngle;
+      const seen = inRange && inAngle && this.hasLineOfSight(gx, gy, r.tx, r.ty);
+      r.sprite.setVisible(seen);
+      r.nameTag.setVisible(seen);
+      if (r.role === ROLE_THIEF) {
+        if (nearestThiefDist === null || dist < nearestThiefDist) nearestThiefDist = dist;
+        if (seen) {
+          sawSomeone = true;
+          this.roomRef.child('caught/' + id).set(true);
+        }
+      }
+    });
+
+    this.debugText.setText(
+      `fatigue: ${this.fatigue.toFixed(0)}/${FATIGUE_MAX}${drowsy ? ' (DROWSY)' : ''}   ` +
+      `nearest thief: ${nearestThiefDist === null ? 'n/a' : nearestThiefDist.toFixed(0) + 'px'} (range ${visionRange.toFixed(0)}px)`
+    );
+
+    const sweep = this.castSweep(gx, gy, this.guardFacing - halfAngle, this.guardFacing + halfAngle,
+      visionRange, RAY_ANGLE_STEPS);
+    const points = [{ x: gx, y: gy }].concat(sweep.points);
+    this.visionGfx.clear();
+    // The darkness now carries the shape, so the beam tint can be subtle —
+    // it's there for warmth and for the red "I can see a Thief" flash.
+    const fillColor = sawSomeone ? 0xff5050 : (drowsy ? 0x8892a8 : 0xfff2b0);
+    const fillAlpha = sawSomeone ? 0.45 : (drowsy ? 0.16 : 0.2);
+    this.visionGfx.fillStyle(fillColor, fillAlpha);
+    this.visionGfx.beginPath();
+    this.visionGfx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) this.visionGfx.lineTo(points[i].x, points[i].y);
+    this.visionGfx.closePath();
+    this.visionGfx.fillPath();
+    this.visionGfx.lineStyle(3, sawSomeone ? 0xff0000 : (drowsy ? 0x6b7690 : 0xffe066), 0.9);
+    this.visionGfx.strokePath();
+
+    this.drawDarkness(gx, gy, [sweep], GUARD_OUTER_DARKNESS, GUARD_INNER_DARKNESS, false);
+  }
+
+  // Thief: NOT a torch. No wall/furniture occlusion at all in the ambient
+  // glow — just a flat, plain 360-degree dim circle around the Thief
+  // (radius THIEF_SIGHT_RADIUS), pitch black beyond it. Built from
+  // buildCircleSweep() (a pure geometric ring, ignoring walls) instead of
+  // castSweep() (which raymarches and stops at the first wall/furniture hit)
+  // — that's the one-line difference from the Nightguard's cone, and it's
+  // what keeps the Thief's glow from getting cut into wedges by walls.
+  // Spotting another PLAYER through a wall is still blocked by
+  // hasLineOfSight below — that's normal "can't see through walls," not the
+  // torch effect the ambient glow was wrongly doing.
+  updateThiefVisibility() {
+    const gx = this.me.x, gy = this.me.y;
+    Object.entries(this.remote).forEach(([id, r]) => {
+      if (this.caughtSet[id]) { r.sprite.setVisible(true); r.nameTag.setVisible(true); return; }
+      const dist = Phaser.Math.Distance.Between(gx, gy, r.tx, r.ty);
+      const seen = dist <= THIEF_SIGHT_RADIUS && this.hasLineOfSight(gx, gy, r.tx, r.ty);
+      r.sprite.setVisible(seen);
+      r.nameTag.setVisible(seen);
+    });
+    const sweeps = [];
+    for (let s = 0; s < THIEF_SWEEPS; s++) {
+      const a0 = -Math.PI + (s / THIEF_SWEEPS) * Math.PI * 2;
+      const a1 = -Math.PI + ((s + 1) / THIEF_SWEEPS) * Math.PI * 2;
+      sweeps.push(this.buildCircleSweep(gx, gy, a0, a1, THIEF_SIGHT_RADIUS, THIEF_RAY_STEPS));
+    }
+    this.drawDarkness(gx, gy, sweeps, THIEF_OUTER_DARKNESS, THIEF_INNER_DARKNESS, true);
+  }
+
+  drawFatigueBar() {
+    const barW = 40, barH = 6;
+    const bx = this.me.x - barW / 2, by = this.me.y - 40;
+    const pct = this.fatigue / FATIGUE_MAX;
+    const color = pct > 0.5 ? 0x5cff8a : (pct > 0.2 ? 0xffd166 : 0xff4d4d);
+    this.fatigueBarGfx.clear();
+    this.fatigueBarGfx.fillStyle(0x000000, 0.5); this.fatigueBarGfx.fillRect(bx - 1, by - 1, barW + 2, barH + 2);
+    this.fatigueBarGfx.fillStyle(color, 0.95); this.fatigueBarGfx.fillRect(bx, by, barW * pct, barH);
+    const drowsy = this.fatigue <= 0;
+    this.zzzText.setVisible(drowsy);
+    if (drowsy) this.zzzText.setPosition(this.me.x, by - 12);
+  }
+
+  drawCoffeeChannelIndicator(channeling) {
+    if (!channeling) { this.coffeeChannelText.setVisible(false); return; }
+    const pct = Math.min(100, Math.round((this.coffeeChannelMs / COFFEE_CHANNEL_MS) * 100));
+    const label = pct >= 100 ? '☕ Fully rested' : `☕ Refilling... ${pct}%`;
+    this.coffeeChannelText.setText(label).setPosition(this.me.x, this.me.y - 56).setVisible(true);
+  }
+
+  drawCoffeeCompass() {
+    if (!this.coffeeMachinePos) { this.coffeeDirText.setVisible(false); return; }
+    const dx = this.coffeeMachinePos.x - this.me.x, dy = this.coffeeMachinePos.y - this.me.y;
+    const dist = Math.round(Math.hypot(dx, dy));
+    const arrows = ['→', '↘', '↓', '↙', '←', '↖', '↑', '↗']; // E, SE, S, SW, W, NW, N, NE
+    const deg = ((Phaser.Math.RadToDeg(Math.atan2(dy, dx)) % 360) + 360) % 360;
+    const arrow = arrows[Math.round(deg / 45) % 8];
+    this.coffeeDirText.setText(`☕ Coffee ${arrow} ${dist}px`).setVisible(true);
+  }
+
+  update(time, delta) {
+    if (!this.netData) return;
+    if (this.matchOver) return;
+
+    // Remote sprites glide toward their last synced position/rotation, unless
+    // they've been caught (a caught thief is pinned to the locker room instead).
+    Object.entries(this.remote).forEach(([id, r]) => {
+      const isCaughtThief = r.role === ROLE_THIEF && !!this.caughtSet[id];
+      if (isCaughtThief) {
+        r.sprite.setPosition(this.lockerRoomPos.x, this.lockerRoomPos.y).setAlpha(0.35);
+        r.nameTag.setPosition(this.lockerRoomPos.x, this.lockerRoomPos.y - 34);
+        return;
+      }
+      r.sprite.x += (r.tx - r.sprite.x) * REMOTE_LERP;
+      r.sprite.y += (r.ty - r.sprite.y) * REMOTE_LERP;
+      r.nameTag.setPosition(r.sprite.x, r.sprite.y - 34);
+      r.sprite.setAlpha(1);
+    });
+
+    const iAmSpectating = this.caughtUntil === -1;
+
+    if (!iAmSpectating) {
+      const speed = this.myRole === ROLE_GUARD ? 150 : 190;
+      let vx = 0, vy = 0;
+      if (this.wasd.left.isDown || this.cursors.left.isDown) vx -= 1;
+      if (this.wasd.right.isDown || this.cursors.right.isDown) vx += 1;
+      if (this.wasd.up.isDown || this.cursors.up.isDown) vy -= 1;
+      if (this.wasd.down.isDown || this.cursors.down.isDown) vy += 1;
+      if (vx !== 0 && vy !== 0) { vx *= 0.7071; vy *= 0.7071; }
+      this.me.body.setVelocity(vx * speed, vy * speed);
+      if (vx !== 0 || vy !== 0) this.guardFacing = Math.atan2(vy, vx);
+    } else {
+      this.me.setPosition(this.lockerRoomPos.x, this.lockerRoomPos.y);
+      this.me.body.setVelocity(0, 0);
+      this.me.setAlpha(0.35);
+    }
+
+    // Fatigue only matters for the Nightguard, and is purely local — only the
+    // exact drowsy on/off state is broadcast so others render the right cone size.
+    //
+    // Refilling requires standing at the coffee machine for COFFEE_CHANNEL_MS
+    // straight ("channeling") — merely brushing past it no longer resets
+    // anything, and stepping away resets the channel progress back to zero, so
+    // a drowsy penalty stays in effect until you actually stop and finish it.
+    if (this.myRole === ROLE_GUARD) {
+      const distToCoffee = Phaser.Math.Distance.Between(this.me.x, this.me.y, this.coffeeMachinePos.x, this.coffeeMachinePos.y);
+      const channeling = distToCoffee <= COFFEE_REFILL_RADIUS;
+      if (channeling) {
+        this.coffeeChannelMs = Math.min(COFFEE_CHANNEL_MS, this.coffeeChannelMs + delta);
+        if (this.coffeeChannelMs >= COFFEE_CHANNEL_MS) this.fatigue = FATIGUE_MAX;
+      } else {
+        this.coffeeChannelMs = 0;
+        this.fatigue = Math.max(0, this.fatigue - FATIGUE_DRAIN_PER_SEC * (delta / 1000));
+      }
+      this.drawFatigueBar();
+      this.drawCoffeeChannelIndicator(channeling);
+      this.drawCoffeeCompass();
+      this.updateMyVisionCone(); // also redraws the darkness + who's visible, for the Nightguard
+    } else if (iAmSpectating) {
+      // caught Thieves spectate with full visibility, no darkness, everyone shown
+      this.darkGfx.clear();
+      Object.values(this.remote).forEach(r => { r.sprite.setVisible(true); r.nameTag.setVisible(true); });
+    } else {
+      this.updateThiefVisibility(); // Thief: circular vision + matching darkness
+    }
+
+    // Countdown to daybreak, based on estimated server time (not local clock —
+    // every player's device clock starts at a different point).
+    if (this.matchStartAt) {
+      const remainingMs = Math.max(0, (this.matchStartAt + this.matchDurationMs) - estimatedServerNow());
+      const remainingSecs = Math.ceil(remainingMs / 1000);
+      const mm = Math.floor(remainingSecs / 60), ss = remainingSecs % 60;
+      this.timerText.setText(`Until daybreak: ${mm}:${ss.toString().padStart(2, '0')}`);
+      if (remainingMs <= 0) this.tryEndMatch('nightguard', 'Daybreak! Time ran out before the target was reached.');
+    }
+
+    // Push my own position to Firebase at a modest rate
+    this.lastSentAt = (this.lastSentAt || 0) + delta;
+    if (this.lastSentAt >= POSITION_SYNC_MS) {
+      this.lastSentAt = 0;
+      this.roomRef.child('positions/' + MY_ID).set({
+        x: Math.round(this.me.x), y: Math.round(this.me.y), facing: this.guardFacing,
+        drowsy: this.myRole === ROLE_GUARD && this.fatigue <= 0,
+        role: this.myRole, name: (this.players[MY_ID] && this.players[MY_ID].name) || 'Player'
+      });
+    }
+  }
+}
+</script>
+</body>
+</html>
