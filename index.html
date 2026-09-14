@@ -470,6 +470,102 @@ async function launchRound(roomRef, ids) {
   return true;
 }
 
+// =========================== AUDIO: synthesized SFX (Web Audio API) ===========================
+// Every sound is generated on the fly with oscillators/gain envelopes and
+// filtered noise — no audio files, same self-contained approach as the
+// procedural graphics. Browsers won't start an AudioContext before a user
+// gesture, so it's created lazily and resumed on the first click/keypress.
+const Snd = {
+  ctx: null,
+  master: null,
+  muted: false,
+
+  ensureContext() {
+    if (this.ctx) return this.ctx;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    this.ctx = new AC();
+    this.master = this.ctx.createGain();
+    this.master.gain.value = 0.35;
+    this.master.connect(this.ctx.destination);
+    return this.ctx;
+  },
+
+  init() {
+    const unlock = () => {
+      const ctx = this.ensureContext();
+      if (ctx && ctx.state === 'suspended') ctx.resume();
+    };
+    window.addEventListener('pointerdown', unlock);
+    window.addEventListener('keydown', unlock);
+  },
+
+  // One tone: freq (Hz), duration (s), waveform, peak gain (0-1), optional
+  // pitch slide target (freqEnd), optional start delay (s).
+  tone(freq, duration, type, peak, freqEnd, delay) {
+    const ctx = this.ensureContext();
+    if (!ctx || this.muted) return;
+    const t0 = ctx.currentTime + (delay || 0);
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.setValueAtTime(freq, t0);
+    if (freqEnd) osc.frequency.exponentialRampToValueAtTime(Math.max(1, freqEnd), t0 + duration);
+    gain.gain.setValueAtTime(0, t0);
+    gain.gain.linearRampToValueAtTime(peak, t0 + Math.min(0.015, duration * 0.3));
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+    osc.connect(gain).connect(this.master);
+    osc.start(t0);
+    osc.stop(t0 + duration + 0.02);
+  },
+
+  // Short burst of filtered noise — for footsteps/impacts, where a pure tone
+  // would sound too musical.
+  noise(duration, peak, filterFreq, delay) {
+    const ctx = this.ensureContext();
+    if (!ctx || this.muted) return;
+    const t0 = ctx.currentTime + (delay || 0);
+    const len = Math.max(1, Math.floor(ctx.sampleRate * duration));
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = filterFreq || 1200;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(peak, t0);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+    src.connect(filter).connect(gain).connect(this.master);
+    src.start(t0);
+  },
+
+  click() { this.tone(720, 0.06, 'square', 0.18); },
+  loot() {
+    this.tone(880, 0.12, 'sine', 0.25, 1400);
+    this.tone(1320, 0.14, 'sine', 0.16, 1760, 0.03);
+  },
+  coffee() {
+    this.tone(660, 0.09, 'triangle', 0.2);
+    this.tone(990, 0.14, 'triangle', 0.18, null, 0.08);
+  },
+  spotted() { this.tone(220, 0.18, 'sawtooth', 0.22, 140); },
+  caught() {
+    this.tone(300, 0.35, 'sawtooth', 0.25, 70);
+    this.noise(0.3, 0.15, 800);
+  },
+  roleReveal() { this.tone(180, 0.5, 'sine', 0.2, 440); },
+  win() {
+    [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => this.tone(f, 0.22, 'sine', 0.2, null, i * 0.09));
+  },
+  lose() {
+    [392, 349.23, 293.66].forEach((f, i) => this.tone(f, 0.35, 'sawtooth', 0.18, null, i * 0.12));
+  },
+  footstep() { this.noise(0.06, 0.05, 300); }
+};
+Snd.init();
+
 // =========================== INTRO: video (optional) then logo ===========================
 // Plays intro.mp4 if it's present next to this file, then a short animated
 // "NIGHT HEIST" logo reveal, then dismisses. Shown once per tab (sessionStorage)
@@ -547,9 +643,9 @@ const Lobby = {
       document.getElementById('joinRoomBtn').disabled = true;
       return;
     }
-    document.getElementById('createRoomBtn').addEventListener('click', () => this.createRoom());
-    document.getElementById('joinRoomBtn').addEventListener('click', () => this.joinRoom());
-    document.getElementById('startMatchBtn').addEventListener('click', () => this.startMatch());
+    document.getElementById('createRoomBtn').addEventListener('click', () => { Snd.click(); this.createRoom(); });
+    document.getElementById('joinRoomBtn').addEventListener('click', () => { Snd.click(); this.joinRoom(); });
+    document.getElementById('startMatchBtn').addEventListener('click', () => { Snd.click(); this.startMatch(); });
     this.attemptResume();
   },
 
@@ -865,6 +961,7 @@ class MainScene extends Phaser.Scene {
     // each round) — movement stays frozen (see update()) until it clears, so
     // nobody moves a step before they know what they are.
     this.roleRevealActive = true;
+    Snd.roleReveal();
     const revealColor = myRole === ROLE_GUARD ? 0xff8c3a : 0x3ad1ff;
     const revealTextColor = myRole === ROLE_GUARD ? '#3a1f00' : '#00232b';
     this.roleRevealBg = this.add.rectangle(mapPxW / 2, mapPxH / 2, mapPxW * 2, mapPxH * 2, revealColor, 1)
@@ -1048,6 +1145,8 @@ class MainScene extends Phaser.Scene {
     const label = winner === 'thief' ? 'THIEVES WIN!' : 'NIGHTGUARD WINS!';
     const color = winner === 'thief' ? '#5cff8a' : '#ff4d4d';
     this.matchBanner.setColor(color).setText(label + '\n' + message).setVisible(true);
+    const iWon = (winner === 'thief' && this.myRole === ROLE_THIEF) || (winner === 'nightguard' && this.myRole === ROLE_GUARD);
+    if (iWon) Snd.win(); else Snd.lose();
     this.showNextRoundPrompt();
   }
 
@@ -1065,7 +1164,7 @@ class MainScene extends Phaser.Scene {
         fontFamily: 'Arial', fontSize: '20px', fontStyle: 'bold', color: '#241a00',
         backgroundColor: '#ffd166', padding: { x: 16, y: 10 }
       }).setOrigin(0.5).setDepth(40).setScrollFactor(0).setInteractive({ useHandCursor: true });
-      this.nextRoundBtn.on('pointerdown', () => this.hostStartNextRound());
+      this.nextRoundBtn.on('pointerdown', () => { Snd.click(); this.hostStartNextRound(); });
     } else {
       this.add.text(mapPxW / 2, y, 'Waiting for the host to start the next round…', {
         fontFamily: 'Arial', fontSize: '15px', color: '#ffe066',
@@ -1100,6 +1199,7 @@ class MainScene extends Phaser.Scene {
     this.me.body.setVelocity(0, 0);
     this.spectatingText.setText("You're in the Locker Room — spectating the rest of the round").setVisible(true);
     this.spawnBurst(this.me.x, this.me.y, 0xff4d4d, 14);
+    Snd.caught();
     this.time.delayedCall(CAUGHT_FREEZE_MS, () => this.caughtText.setVisible(false));
   }
 
@@ -1312,6 +1412,7 @@ class MainScene extends Phaser.Scene {
     item.sprite.setActive(false).setVisible(false);
     item.label.setVisible(false);
     this.spawnBurst(item.sprite.x, item.sprite.y, 0xffd700, 10);
+    Snd.loot();
     const value = item.value;
     this.roomRef.child('lootCollected/' + item.id).transaction(
       current => (current ? undefined : true),
@@ -1587,6 +1688,8 @@ class MainScene extends Phaser.Scene {
         }
       }
     });
+    if (sawSomeone && !this._wasSawSomeone) Snd.spotted();
+    this._wasSawSomeone = sawSomeone;
 
     const sweep = this.castSweep(gx, gy, this.guardFacing - halfAngle, this.guardFacing + halfAngle,
       visionRange, RAY_ANGLE_STEPS);
@@ -1718,8 +1821,13 @@ class MainScene extends Phaser.Scene {
         this.walkT = (this.walkT || 0) + delta;
         const bob = Math.sin(this.walkT * 0.014) * 0.07;
         this.me.setScale(1 - bob * 0.5, 1 + bob);
+        // A quiet footstep tick roughly every ~330ms of continuous movement —
+        // gated by a timer, not every frame, so it doesn't turn into noise.
+        this.footstepMs = (this.footstepMs || 0) + delta;
+        if (this.footstepMs >= 330) { this.footstepMs = 0; Snd.footstep(); }
       } else {
         this.me.setScale(1, 1);
+        this.footstepMs = 0;
       }
     } else {
       this.me.setPosition(this.lockerRoomPos.x, this.lockerRoomPos.y);
@@ -1738,8 +1846,12 @@ class MainScene extends Phaser.Scene {
       const distToCoffee = Phaser.Math.Distance.Between(this.me.x, this.me.y, this.coffeeMachinePos.x, this.coffeeMachinePos.y);
       const channeling = distToCoffee <= COFFEE_REFILL_RADIUS;
       if (channeling) {
+        const wasFull = this.coffeeChannelMs >= COFFEE_CHANNEL_MS;
         this.coffeeChannelMs = Math.min(COFFEE_CHANNEL_MS, this.coffeeChannelMs + delta);
-        if (this.coffeeChannelMs >= COFFEE_CHANNEL_MS) this.fatigue = FATIGUE_MAX;
+        if (this.coffeeChannelMs >= COFFEE_CHANNEL_MS) {
+          if (!wasFull) Snd.coffee();
+          this.fatigue = FATIGUE_MAX;
+        }
       } else {
         this.coffeeChannelMs = 0;
         this.fatigue = Math.max(0, this.fatigue - FATIGUE_DRAIN_PER_SEC * (delta / 1000));
