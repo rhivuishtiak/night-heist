@@ -974,22 +974,61 @@ class MainScene extends Phaser.Scene {
     this.caughtText.setPosition(this.me.x, this.me.y - 40).setVisible(true);
     this.me.body.setVelocity(0, 0);
     this.spectatingText.setText("You're in the Locker Room — spectating the rest of the round").setVisible(true);
+    this.spawnBurst(this.me.x, this.me.y, 0xff4d4d, 14);
     this.time.delayedCall(CAUGHT_FREEZE_MS, () => this.caughtText.setVisible(false));
+  }
+
+  // Small one-shot particle burst (loot pickup / getting caught) — plain
+  // tweened sprites rather than a Phaser particle emitter, so there's no
+  // emitter lifecycle to manage for a single instant effect.
+  spawnBurst(x, y, color, count) {
+    for (let i = 0; i < count; i++) {
+      const angle = (i / count) * Math.PI * 2 + Math.random() * 0.4;
+      const dist = 16 + Math.random() * 26;
+      const p = this.add.image(x, y, 'sparkTex').setTint(color).setDepth(25).setScale(0.8 + Math.random() * 0.6);
+      this.tweens.add({
+        targets: p,
+        x: x + Math.cos(angle) * dist,
+        y: y + Math.sin(angle) * dist,
+        alpha: 0,
+        scale: 0,
+        duration: 400 + Math.random() * 200,
+        ease: 'Quad.easeOut',
+        onComplete: () => p.destroy()
+      });
+    }
   }
 
   // ---- textures ----
   buildTextures() {
     const g = this.add.graphics();
 
+    // Floor: flat fill plus a soft embossed bevel (light top/left, dark bottom/right)
+    // so tiles read as slightly raised instead of perfectly flat paper.
     g.fillStyle(0xd7dbe2, 1); g.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
+    g.fillStyle(0xffffff, 0.15); g.fillRect(0, 0, TILE_SIZE, 3); g.fillRect(0, 0, 3, TILE_SIZE);
+    g.fillStyle(0x000000, 0.08); g.fillRect(0, TILE_SIZE - 3, TILE_SIZE, 3); g.fillRect(TILE_SIZE - 3, 0, 3, TILE_SIZE);
     g.lineStyle(1, 0xc3c8d1, 1); g.strokeRect(0, 0, TILE_SIZE, TILE_SIZE);
     g.generateTexture('floorTile', TILE_SIZE, TILE_SIZE);
 
     g.clear();
     g.fillStyle(0x2b2f7a, 1); g.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
     g.fillStyle(0x4655c9, 1); g.fillRoundedRect(4, 4, TILE_SIZE - 8, TILE_SIZE - 8, 6);
+    g.fillStyle(0xffffff, 0.12); g.fillRoundedRect(4, 4, TILE_SIZE - 8, (TILE_SIZE - 8) / 2, 6);
     g.lineStyle(2, 0x1c2060, 1); g.strokeRoundedRect(4, 4, TILE_SIZE - 8, TILE_SIZE - 8, 6);
     g.generateTexture('wallTile', TILE_SIZE, TILE_SIZE);
+
+    // Soft drop shadow, stamped under every piece of furniture at render time
+    // (buildOfficeProps) — one shared texture stretched to fit each item,
+    // rather than baking a shadow into every individual furniture texture.
+    g.clear();
+    g.fillStyle(0x000000, 0.32); g.fillEllipse(32, 12, 32, 12);
+    g.generateTexture('shadowTex', 64, 24);
+
+    // Small soft dot used for the loot-pickup / caught particle bursts.
+    g.clear();
+    g.fillStyle(0xffffff, 1); g.fillCircle(5, 5, 5);
+    g.generateTexture('sparkTex', 10, 10);
 
     g.clear();
     g.fillStyle(0xa9793f, 1); g.fillRoundedRect(0, 6, TILE_SIZE * 2, TILE_SIZE - 6, 8);
@@ -1066,6 +1105,7 @@ class MainScene extends Phaser.Scene {
     g.fillStyle(0x000000, 0.28); g.fillEllipse(W / 2, H - 6, 24, 9);
     g.fillStyle(outlineColor, 1); g.fillRoundedRect(3, 3, W - 6, H - 16, 17);
     g.fillStyle(mainColor, 1); g.fillRoundedRect(7, 6, W - 14, H - 22, 14);
+    g.fillStyle(0xffffff, 0.18); g.fillEllipse(W / 2 - 6, 14, 14, 10);
     g.fillStyle(0xcdeffa, 0.95); g.fillEllipse(W / 2 + 6, 20, 16, 12);
     g.lineStyle(2, 0x577c86, 0.7); g.strokeEllipse(W / 2 + 6, 20, 16, 12);
     g.generateTexture(key, W, H);
@@ -1106,6 +1146,7 @@ class MainScene extends Phaser.Scene {
       }).setOrigin(0.5, 1).setDepth(6);
 
       getFurnitureRects(room).forEach(it => {
+        this.add.image(it.x, it.y + it.h / 2 - 4, 'shadowTex').setDisplaySize(it.w * 0.85, 14).setDepth(1.8);
         if (it.collide) {
           const p = this.propsGroup.create(it.x, it.y, it.tex);
           p.setDepth(3);
@@ -1122,13 +1163,16 @@ class MainScene extends Phaser.Scene {
   buildLootFromList(lootList) {
     this.lootGroup = this.physics.add.staticGroup();
     this.lootItems = (lootList || []).map(it => {
+      this.add.image(it.x, it.y + 10, 'shadowTex').setDisplaySize(20, 8).setAlpha(0.8).setDepth(2.5);
       const sprite = this.lootGroup.create(it.x, it.y, 'lootTex');
       sprite.setDepth(3);
       const label = this.add.text(it.x, it.y - 20, '$' + it.value, {
         fontFamily: 'Arial', fontSize: '12px', color: '#fff6c9', fontStyle: 'bold',
         stroke: '#3a2c00', strokeThickness: 3
       }).setOrigin(0.5).setDepth(4);
-      return { id: it.id, sprite, label, value: it.value };
+      // A gentle bob + spin-like squash so loot doesn't just sit dead still —
+      // baseY/phase let update() animate each coin on its own offset cycle.
+      return { id: it.id, sprite, label, value: it.value, baseY: it.y, bobPhase: Math.random() * 1000 };
     });
   }
 
@@ -1142,6 +1186,7 @@ class MainScene extends Phaser.Scene {
     // which left it fully visible on screen until a page refresh.
     item.sprite.setActive(false).setVisible(false);
     item.label.setVisible(false);
+    this.spawnBurst(item.sprite.x, item.sprite.y, 0xffd700, 10);
     const value = item.value;
     this.roomRef.child('lootCollected/' + item.id).transaction(
       current => (current ? undefined : true),
@@ -1469,6 +1514,17 @@ class MainScene extends Phaser.Scene {
       r.sprite.y += (r.ty - r.sprite.y) * REMOTE_LERP;
       r.nameTag.setPosition(r.sprite.x, r.sprite.y - 34);
       r.sprite.setAlpha(1);
+      r.sprite.setFlipX(Math.cos(r.facing) < 0);
+    });
+
+    // Idle bob + a scale wobble (stands in for a spin) so loot doesn't sit
+    // dead still on screen — purely cosmetic, the static physics body used
+    // for pickup detection never moves.
+    this.lootItems.forEach(item => {
+      if (!item.sprite.active) return;
+      const t = time + item.bobPhase;
+      item.sprite.y = item.baseY + Math.sin(t * 0.003) * 3;
+      item.sprite.scaleX = 0.82 + Math.abs(Math.sin(t * 0.0025)) * 0.3;
     });
 
     const iAmSpectating = this.caughtUntil === -1;
@@ -1485,6 +1541,17 @@ class MainScene extends Phaser.Scene {
       if (vx !== 0 && vy !== 0) { vx *= 0.7071; vy *= 0.7071; }
       this.me.body.setVelocity(vx * speed, vy * speed);
       if (vx !== 0 || vy !== 0) this.guardFacing = Math.atan2(vy, vx);
+      if (vx !== 0) this.me.setFlipX(vx < 0);
+      // A gentle squash-and-stretch walk cycle while actually moving — pure
+      // cosmetic scale on the display object, the Arcade body/collider stay
+      // their normal fixed size regardless.
+      if (vx !== 0 || vy !== 0) {
+        this.walkT = (this.walkT || 0) + delta;
+        const bob = Math.sin(this.walkT * 0.014) * 0.07;
+        this.me.setScale(1 - bob * 0.5, 1 + bob);
+      } else {
+        this.me.setScale(1, 1);
+      }
     } else {
       this.me.setPosition(this.lockerRoomPos.x, this.lockerRoomPos.y);
       this.me.body.setVelocity(0, 0);
