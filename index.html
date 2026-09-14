@@ -106,6 +106,17 @@
     position: absolute; bottom: 22px; right: 26px;
     background: rgba(20, 24, 40, 0.7); color: #dfe6f0; border: 1px solid #3a4568;
     border-radius: 6px; padding: 7px 14px; font-size: 13px; cursor: pointer;
+    z-index: 3;
+  }
+  /* Shown first, before the video starts — browsers only allow audio to
+     autoplay as a direct result of a real click, so this is what actually
+     guarantees sound plays from frame one instead of depending on catching
+     a click sometime during playback. */
+  #introBeginGate {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    background: rgba(5, 7, 13, 0.6); color: #ffd166; border: none;
+    font: inherit; font-size: 20px; font-weight: 700; letter-spacing: 1px;
+    cursor: pointer; z-index: 2;
   }
   @keyframes logoLetterIn {
     0% { opacity: 0; text-shadow: 0 0 26px #fff6c9, 0 0 6px #fff; transform: translateY(4px); }
@@ -129,6 +140,7 @@
     <p class="logo-sub">Guard &amp; Thief</p>
   </div>
   <button id="introSkip">Skip ▶</button>
+  <button id="introBeginGate">🔊 Click to begin (with sound)</button>
 </div>
 
 <div id="lobby">
@@ -608,7 +620,9 @@ const Intro = {
       screen.style.opacity = '0';
       setTimeout(() => { screen.style.display = 'none'; }, 500);
     };
+    const beginGate = document.getElementById('introBeginGate');
     const playLogo = () => {
+      beginGate.style.display = 'none';
       video.style.display = 'none';
       logo.style.display = 'flex';
       setTimeout(finish, 3200);
@@ -618,26 +632,24 @@ const Intro = {
     video.addEventListener('ended', playLogo);
     video.src = 'intro.mp4';
     video.style.display = 'block';
-    // Browsers only allow autoplay WITH sound as a direct result of a user
-    // gesture, so — per Chrome's own documented autoplay pattern
-    // (web.dev/autoplay-policy) — always start muted (guaranteed to autoplay
-    // successfully) and unmute the instant the player interacts. Previously
-    // this also tried an unmuted play() first as a "maybe it works" attempt;
-    // dropped that — it's not the documented pattern, added a second
-    // concurrent play() call for no verified benefit, and was a plausible
-    // source of exactly the kind of state confusion that would explain sound
-    // still not working after everything else checked out.
-    video.muted = true;
-    video.play().catch(playLogo);
-    // Same reasoning as Snd.init()'s unlock — don't rely on pointerdown
-    // alone, listen for every standard gesture event.
-    const unmute = () => { video.muted = false; };
-    ['pointerdown', 'mousedown', 'touchstart', 'touchend', 'click', 'keydown'].forEach(evt =>
-      window.addEventListener(evt, unmute, { once: true, passive: true })
-    );
-    // intro.mp4 isn't in this repo yet — if it never even starts loading,
-    // don't leave players staring at a black screen waiting for it.
-    setTimeout(() => { if (video.readyState === 0) playLogo(); }, 800);
+
+    // Browsers only allow audio to autoplay as a DIRECT result of a real
+    // click — there is no way around this on a page's first-ever load, for
+    // any site. So: don't start the video until the player explicitly taps
+    // "begin", then call play() synchronously inside that click handler —
+    // that's what guarantees real sound from frame one, every time, instead
+    // of depending on catching a click sometime during a silently-playing
+    // video (which is why it's stayed silent — nothing was clicked while it
+    // was actually running).
+    beginGate.addEventListener('click', () => {
+      beginGate.style.display = 'none';
+      video.muted = false;
+      video.play().catch(playLogo);
+    }, { once: true });
+
+    // If intro.mp4 is missing/unreachable, don't make players click a gate
+    // for nothing — jump straight to the logo instead.
+    setTimeout(() => { if (video.readyState === 0 && !done) playLogo(); }, 1500);
   },
 
   buildLogoLetters() {
