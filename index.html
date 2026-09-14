@@ -151,7 +151,26 @@ if (!FIREBASE_NOT_CONFIGURED) {
 }
 function estimatedServerNow() { return Date.now() + serverOffset; }
 
-const MY_ID = 'p_' + Math.random().toString(36).slice(2, 10);
+// Persisted across reloads of THIS TAB (sessionStorage, not localStorage) so
+// a refresh mid-match can rejoin the same player slot instead of minting a
+// brand-new player. Deliberately per-tab, not per-browser: localStorage would
+// make two tabs of the same browser share one player id and fight over the
+// same slot, which is worse than the problem this is meant to fix. Falls
+// back to a fresh one-off id if sessionStorage isn't available (private
+// browsing etc).
+function getOrCreateMyId() {
+  try {
+    let id = sessionStorage.getItem('nightheist_playerId');
+    if (!id) {
+      id = 'p_' + Math.random().toString(36).slice(2, 10);
+      sessionStorage.setItem('nightheist_playerId', id);
+    }
+    return id;
+  } catch (e) {
+    return 'p_' + Math.random().toString(36).slice(2, 10);
+  }
+}
+const MY_ID = getOrCreateMyId();
 const ROLE_THIEF = 'thief';
 const ROLE_GUARD = 'nightguard';
 
@@ -230,6 +249,9 @@ const DROWSY_ANGLE_MULT = 0.5;
 
 const POSITION_SYNC_MS = 120; // how often we push our own position to Firebase
 const REMOTE_LERP = 0.25;     // how quickly remote sprites glide toward their synced position
+
+const PRESENCE_GRACE_MS = 8000;         // how long a disconnected player's slot is held open for them to reconnect
+const RESUME_WINDOW_MS = 5 * 60 * 1000; // don't auto-rejoin a room remembered from longer ago than this
 
 const ROOM_THEMES = [
   { name: 'Break Room',        floor: 0xF3CFA0 },
@@ -409,6 +431,7 @@ const Lobby = {
     document.getElementById('createRoomBtn').addEventListener('click', () => this.createRoom());
     document.getElementById('joinRoomBtn').addEventListener('click', () => this.joinRoom());
     document.getElementById('startMatchBtn').addEventListener('click', () => this.startMatch());
+    this.attemptResume();
   },
 
   getName() {
@@ -460,24 +483,69 @@ const Lobby = {
     }
   },
 
-  // Without this, a player who closes the tab, loses connection, or just
-  // refreshes the page (which mints a brand new MY_ID on load, orphaning the
-  // old one) leaves a permanent "ghost" entry in players/. launchRound()
-  // assigns a role to every id still under players/, so a ghost can eat the
-  // room's only Nightguard slot (nobody patrols that round) or become a
-  // Thief that can never be marked caught (checkAllThievesCaught() can then
-  // never be satisfied). Registering this the moment we're actually in the
-  // room means Firebase cleans up our own node the instant we disconnect.
+  // A refresh or brief connection drop should let a player seamlessly resume
+  // their same slot (same role, same loot/caught progress) instead of being
+  // treated as gone — so disconnect no longer hard-deletes players/{id}. It
+  // only removes positions/{id} (so their avatar vanishes for everyone right
+  // away, rather than standing there like a stuck ghost) and stamps
+  // disconnectedAt on their player entry. attemptResume() below clears that
+  // stamp the moment they come back. Anyone who *doesn't* come back within
+  // PRESENCE_GRACE_MS is pruned by the host's pruneStalePlayers() so they
+  // don't permanently eat a role slot in later rounds.
   registerPresenceCleanup(roomRef) {
-    roomRef.child('players/' + MY_ID).onDisconnect().remove();
     roomRef.child('positions/' + MY_ID).onDisconnect().remove();
-    roomRef.child('caught/' + MY_ID).onDisconnect().remove();
+    roomRef.child('players/' + MY_ID + '/disconnectedAt').onDisconnect().set(firebase.database.ServerValue.TIMESTAMP);
+    roomRef.child('players/' + MY_ID + '/disconnectedAt').remove();
+  },
+
+  // Host-only: periodically drop any player whose disconnectedAt stamp is
+  // older than the grace window, so an abandoned tab doesn't permanently
+  // occupy a Nightguard/Thief slot in future rounds. Runs during the lobby
+  // wait and mid-match alike.
+  startStalePlayerPruning(roomRef) {
+    if (this.pruneInterval) clearInterval(this.pruneInterval);
+    this.pruneInterval = setInterval(async () => {
+      if (!this.isHost) return;
+      const snap = await roomRef.child('players').once('value');
+      const players = snap.val() || {};
+      const now = Date.now();
+      Object.entries(players).forEach(([id, p]) => {
+        if (p.disconnectedAt && now - p.disconnectedAt > PRESENCE_GRACE_MS) {
+          roomRef.child('players/' + id).remove();
+          roomRef.child('caught/' + id).remove();
+        }
+      });
+    }, PRESENCE_GRACE_MS);
+  },
+
+  // Called once on page load, before showing the join/create screen. If we
+  // remember being in a room recently (sessionStorage) and that room still
+  // knows about us, rejoin it directly — this is what makes a refresh
+  // mid-match resume instead of dumping the player back to square one.
+  async attemptResume() {
+    let saved = null;
+    try { saved = JSON.parse(sessionStorage.getItem('nightheist_lastRoom') || 'null'); } catch (e) { /* ignore */ }
+    if (!saved || !saved.code || Date.now() - (saved.savedAt || 0) > RESUME_WINDOW_MS) return false;
+    try {
+      const roomRef = db.ref('rooms/' + saved.code);
+      const snap = await roomRef.once('value');
+      if (!snap.exists()) return false;
+      const room = snap.val();
+      if (!room.players || !room.players[MY_ID]) return false;
+      this.registerPresenceCleanup(roomRef);
+      this.enterRoom(saved.code, room.hostId === MY_ID);
+      return true;
+    } catch (e) {
+      return false;
+    }
   },
 
   enterRoom(code, isHost) {
     this.roomCode = code;
     this.isHost = isHost;
     this.roomRef = db.ref('rooms/' + code);
+    try { sessionStorage.setItem('nightheist_lastRoom', JSON.stringify({ code, savedAt: Date.now() })); } catch (e) { /* ignore */ }
+    this.startStalePlayerPruning(this.roomRef);
 
     document.getElementById('roomCodeDisplay').textContent = code;
     document.getElementById('roomView').style.display = 'block';
@@ -491,7 +559,7 @@ const Lobby = {
       ul.innerHTML = '';
       Object.entries(players).forEach(([id, p]) => {
         const li = document.createElement('li');
-        li.textContent = p.name + (id === MY_ID ? ' (you)' : '');
+        li.textContent = p.name + (id === MY_ID ? ' (you)' : '') + (p.disconnectedAt ? ' (reconnecting…)' : '');
         ul.appendChild(li);
       });
       const n = Object.keys(players).length;
@@ -639,10 +707,12 @@ class MainScene extends Phaser.Scene {
     this.darkGfx = this.add.graphics().setDepth(9);
     this.coffeeChannelMs = 0;
 
+    // Only Thieves get to see live loot progress — the Nightguard isn't meant
+    // to know how close the Thieves are to hitting their target.
     this.lootText = this.add.text(mapPxW - 10, 10, '', {
       fontFamily: 'Arial', fontSize: '18px', color: '#fff6c9', fontStyle: 'bold',
       stroke: '#3a2c00', strokeThickness: 4
-    }).setOrigin(1, 0).setDepth(30).setScrollFactor(0);
+    }).setOrigin(1, 0).setDepth(30).setScrollFactor(0).setVisible(myRole === ROLE_THIEF);
     this.timerText = this.add.text(mapPxW - 10, 34, '', {
       fontFamily: 'Arial', fontSize: '16px', color: '#cfe0ff',
       stroke: '#0a1030', strokeThickness: 4
@@ -664,10 +734,45 @@ class MainScene extends Phaser.Scene {
       fontFamily: 'Arial', fontSize: '14px', color: '#ffe066', fontStyle: 'bold',
       backgroundColor: '#000000aa', padding: { x: 10, y: 5 }
     }).setOrigin(0.5, 0).setDepth(30).setScrollFactor(0).setVisible(false);
-    this.debugText = this.add.text(6, GRID_H * TILE_SIZE - 60, '', {
-      fontFamily: 'monospace', fontSize: '12px', color: '#00ff88',
-      backgroundColor: '#00000099', padding: { x: 6, y: 4 }
-    }).setDepth(30).setScrollFactor(0);
+
+    // Full-screen role-reveal shown for a couple seconds at the start of every
+    // round (including "Start Next Round", since this whole scene is rebuilt
+    // each round) — movement stays frozen (see update()) until it clears, so
+    // nobody moves a step before they know what they are.
+    this.roleRevealActive = true;
+    const revealColor = myRole === ROLE_GUARD ? 0xff8c3a : 0x3ad1ff;
+    const revealTextColor = myRole === ROLE_GUARD ? '#3a1f00' : '#00232b';
+    this.roleRevealBg = this.add.rectangle(mapPxW / 2, mapPxH / 2, mapPxW * 2, mapPxH * 2, revealColor, 1)
+      .setDepth(50).setScrollFactor(0).setAlpha(0);
+    this.roleRevealTitle = this.add.text(mapPxW / 2, mapPxH / 2 - 20,
+      myRole === ROLE_GUARD ? 'YOU ARE THE\nNIGHTGUARD' : 'YOU ARE THE\nTHIEF', {
+      fontFamily: 'Arial', fontSize: '46px', fontStyle: 'bold', align: 'center',
+      color: revealTextColor, lineSpacing: 6
+    }).setOrigin(0.5).setDepth(51).setScrollFactor(0).setAlpha(0).setScale(0.4);
+    this.roleRevealSub = this.add.text(mapPxW / 2, mapPxH / 2 + 70,
+      myRole === ROLE_GUARD ? 'Patrol the office and catch every Thief before daybreak.'
+                             : `Collect $${LOOT_TARGET} in loot without getting caught.`, {
+      fontFamily: 'Arial', fontSize: '16px', fontStyle: 'bold', align: 'center', color: revealTextColor
+    }).setOrigin(0.5).setDepth(51).setScrollFactor(0).setAlpha(0);
+    this.tweens.add({
+      targets: this.roleRevealBg, alpha: 0.96, duration: 250, ease: 'Quad.easeOut'
+    });
+    this.tweens.add({
+      targets: [this.roleRevealTitle, this.roleRevealSub], alpha: 1, duration: 350, delay: 100, ease: 'Quad.easeOut'
+    });
+    this.tweens.add({
+      targets: this.roleRevealTitle, scale: 1, duration: 450, delay: 100, ease: 'Back.easeOut'
+    });
+    this.time.delayedCall(1900, () => {
+      this.tweens.add({
+        targets: [this.roleRevealBg, this.roleRevealTitle, this.roleRevealSub], alpha: 0, duration: 400,
+        ease: 'Quad.easeIn',
+        onComplete: () => {
+          this.roleRevealActive = false;
+          [this.roleRevealBg, this.roleRevealTitle, this.roleRevealSub].forEach(o => o.destroy());
+        }
+      });
+    });
 
     this.matchStartAt = room.matchStartAt;
     this.matchDurationMs = room.matchDurationMs;
@@ -797,7 +902,7 @@ class MainScene extends Phaser.Scene {
   }
 
   updateLootText() {
-    if (this.myRole === ROLE_THIEF || true) this.lootText.setText(`$${this.lootCollected} / $${LOOT_TARGET}`);
+    if (this.myRole === ROLE_THIEF) this.lootText.setText(`$${this.lootCollected} / $${LOOT_TARGET}`);
   }
 
   checkAllThievesCaught() {
@@ -1245,7 +1350,7 @@ class MainScene extends Phaser.Scene {
     const halfAngleDeg = drowsy ? VISION_HALF_ANGLE_DEG * DROWSY_ANGLE_MULT : VISION_HALF_ANGLE_DEG;
     const halfAngle = Phaser.Math.DegToRad(halfAngleDeg);
 
-    let nearestThiefDist = null, sawSomeone = false;
+    let sawSomeone = false;
     Object.entries(this.remote).forEach(([id, r]) => {
       // Caught players are always shown (frozen, dimmed, in the locker room) —
       // everyone else is only visible if they're actually inside my cone right
@@ -1262,18 +1367,12 @@ class MainScene extends Phaser.Scene {
       r.sprite.setVisible(seen);
       r.nameTag.setVisible(seen);
       if (r.role === ROLE_THIEF) {
-        if (nearestThiefDist === null || dist < nearestThiefDist) nearestThiefDist = dist;
         if (seen) {
           sawSomeone = true;
           this.roomRef.child('caught/' + id).set(true);
         }
       }
     });
-
-    this.debugText.setText(
-      `fatigue: ${this.fatigue.toFixed(0)}/${FATIGUE_MAX}${drowsy ? ' (DROWSY)' : ''}   ` +
-      `nearest thief: ${nearestThiefDist === null ? 'n/a' : nearestThiefDist.toFixed(0) + 'px'} (range ${visionRange.toFixed(0)}px)`
-    );
 
     const sweep = this.castSweep(gx, gy, this.guardFacing - halfAngle, this.guardFacing + halfAngle,
       visionRange, RAY_ANGLE_STEPS);
@@ -1374,7 +1473,9 @@ class MainScene extends Phaser.Scene {
 
     const iAmSpectating = this.caughtUntil === -1;
 
-    if (!iAmSpectating) {
+    if (this.roleRevealActive) {
+      this.me.body.setVelocity(0, 0);
+    } else if (!iAmSpectating) {
       const speed = this.myRole === ROLE_GUARD ? 150 : 190;
       let vx = 0, vy = 0;
       if (this.wasd.left.isDown || this.cursors.left.isDown) vx -= 1;
