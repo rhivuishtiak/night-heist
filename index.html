@@ -496,8 +496,14 @@ const Snd = {
       const ctx = this.ensureContext();
       if (ctx && ctx.state === 'suspended') ctx.resume();
     };
-    window.addEventListener('pointerdown', unlock);
-    window.addEventListener('keydown', unlock);
+    // pointerdown alone isn't reliable across every browser/device for
+    // detecting "the first user gesture" — some touch browsers fire
+    // touchstart/click without a pointerdown a script can rely on. Listen
+    // for every standard gesture event so the very first interaction of any
+    // kind unlocks audio, not just a mouse-style pointerdown.
+    ['pointerdown', 'mousedown', 'touchstart', 'touchend', 'click', 'keydown'].forEach(evt =>
+      window.addEventListener(evt, unlock, { passive: true })
+    );
   },
 
   // One tone: freq (Hz), duration (s), waveform, peak gain (0-1), optional
@@ -612,9 +618,12 @@ const Intro = {
       video.muted = true;
       video.play().catch(playLogo);
     });
+    // Same reasoning as Snd.init()'s unlock — don't rely on pointerdown
+    // alone, listen for every standard gesture event.
     const unmute = () => { video.muted = false; };
-    window.addEventListener('pointerdown', unmute, { once: true });
-    window.addEventListener('keydown', unmute, { once: true });
+    ['pointerdown', 'mousedown', 'touchstart', 'touchend', 'click', 'keydown'].forEach(evt =>
+      window.addEventListener(evt, unmute, { once: true, passive: true })
+    );
     // intro.mp4 isn't in this repo yet — if it never even starts loading,
     // don't leave players staring at a black screen waiting for it.
     setTimeout(() => { if (video.readyState === 0) playLogo(); }, 800);
