@@ -27,7 +27,11 @@
     display: none;
   }
   #ui b { color: #ffd166; }
-  #game-container { display: none; }
+  #game-container {
+    display: none;
+    position: fixed; inset: 0;
+    width: 100vw; height: 100vh;
+  }
   #game-container canvas { display: block; margin: 0 auto; }
 
   #lobby {
@@ -745,6 +749,12 @@ function bootGame(roomCode, roomRef, room) {
     height: GRID_H * TILE_SIZE,
     parent: 'game-container',
     backgroundColor: '#05070d',
+    // The internal game world stays a fixed GRID_W*TILE_SIZE x GRID_H*TILE_SIZE
+    // resolution (all gameplay math — vision ranges, tile sizes, spawn points —
+    // is in those units) — FIT just scales how that's displayed, growing the
+    // canvas to fill the browser window (letterboxed to keep the map's
+    // proportions) instead of always rendering at a small fixed pixel size.
+    scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
     physics: { default: 'arcade', arcade: { debug: false } },
     scene: [MainScene]
   };
@@ -1392,7 +1402,49 @@ class MainScene extends Phaser.Scene {
   // One angular sweep of the torch: the angles cast, and where each ray died.
   castSweep(ox, oy, startAngle, endAngle, range, steps) {
     const angles = this.buildSweepAngles(ox, oy, startAngle, endAngle, range, steps);
-    return { angles, points: angles.map(a => this.castRay(ox, oy, a, range)) };
+    const points = angles.map(a => this.castRay(ox, oy, a, range));
+    this.sanitizeSweepPoints(points);
+    return { angles, points };
+  }
+
+  // buildSweepAngles' corner-supplement rays catch most wall corners, but not
+  // every case (e.g. squeezing past two nearby corners at once) — when they
+  // miss, the straight polygon edge between two adjacent rays can cut clean
+  // through solid wall, rendering as a stray beam of "visible" reaching past
+  // where a wall should block it. This is a direct, brute-force safety net:
+  // for every edge, check against the real wall grid (not angle math) and, if
+  // the edge is mostly inside blocked territory, binary-search the actual
+  // boundary and split the edge there instead. Mutates `points` in place —
+  // deliberately doesn't touch the parallel `angles` array (callers that pair
+  // them, like drawDarkness, only ever need angles[0]/angles[last]).
+  sanitizeSweepPoints(points) {
+    for (let pass = 0; pass < 2; pass++) {
+      let inserted = false;
+      for (let i = 0; i < points.length - 1; i++) {
+        const p0 = points[i], p1 = points[i + 1];
+        const dx = p1.x - p0.x, dy = p1.y - p0.y;
+        const segLen = Math.hypot(dx, dy);
+        if (segLen < 12) continue; // too short to meaningfully cut through a 48px wall tile
+        let blocked = 0, total = 0;
+        for (let t = 0.25; t < 1; t += 0.25) {
+          total++;
+          if (this.isBlockedAt(p0.x + dx * t, p0.y + dy * t)) blocked++;
+        }
+        if (blocked < total * 0.5) continue;
+        let lo = 0, hi = 1;
+        for (let iter = 0; iter < 14; iter++) {
+          const mid = (lo + hi) / 2;
+          if (this.isBlockedAt(p0.x + dx * mid, p0.y + dy * mid)) hi = mid; else lo = mid;
+        }
+        points.splice(i + 1, 0, { x: p0.x + dx * lo, y: p0.y + dy * lo });
+        inserted = true;
+        // Deliberately no extra i++ here: the loop's own increment moves to
+        // the (newPoint, p1) segment next, which still needs checking — a
+        // wall can poke into the middle of an edge with BOTH original
+        // endpoints unblocked, needing a split on each side of the obstacle.
+      }
+      if (!inserted) break;
+    }
   }
 
   // A plain, UNOCCLUDED ring of sample points at a fixed radius — no raycast,
@@ -1459,11 +1511,13 @@ class MainScene extends Phaser.Scene {
     if (outerDarkness > 0) {
       this.darkGfx.fillStyle(0x000000, outerDarkness);
       sweeps.forEach(s => {
-        const n = s.points.length;
-        if (n < 2) return;
+        if (s.points.length < 2) return;
+        // Use the LAST angle, not points.length-1 — sanitizeSweepPoints() can
+        // insert extra points without growing `angles` in lockstep.
+        const lastAngle = s.angles[s.angles.length - 1];
         const poly = s.points.slice();
-        poly.push(this.rectExit(ox, oy, s.angles[n - 1]));
-        const corners = this.cornersBetween(ox, oy, s.angles[0], s.angles[n - 1]);
+        poly.push(this.rectExit(ox, oy, lastAngle));
+        const corners = this.cornersBetween(ox, oy, s.angles[0], lastAngle);
         for (let i = corners.length - 1; i >= 0; i--) poly.push(corners[i]);
         poly.push(this.rectExit(ox, oy, s.angles[0]));
         this.fillDarkPoly(poly);
